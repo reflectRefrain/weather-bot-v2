@@ -10,6 +10,7 @@ from market_scanner import scan
 from executor import (place_order, cancel_stale_orders, daily_loss_check,
                       kill_switch_on, set_state, get_state, log_event)
 from reconcile import sync
+from position_manager import manage_positions
 from telegram_bot import notify, run_bot_async
 
 CONFIG_PATH = os.getenv("CONFIG_PATH", "/app/config.yaml")
@@ -83,6 +84,16 @@ async def trader_loop():
                 log(f"Reconcile error: {result['error']}")
             else:
                 log(f"Reconcile: {result['synced']} open, {result['cleared']} cleared")
+
+            pm_results = manage_positions(k, dry_run=False)
+            for pm in pm_results:
+                if pm.get("action") in ("TP", "SL"):
+                    log(
+                        f"Position manager {pm['action']}: {pm['ticker']} "
+                        f"{pm['side']} qty={pm['qty']} "
+                        f"entry={pm['entry_cents']}c exit={pm['exit_cents']}c "
+                        f"pnl=${pm['realized_usd']:+.2f}"
+                    )
 
             cancel_stale_orders(k, cfg)
 
