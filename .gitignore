@@ -6,3 +6,6 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+
+# Generated report exports
+data/exports/
