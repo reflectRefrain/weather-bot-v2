@@ -1,8 +1,8 @@
-version: "3.9"
-
 services:
   trader:
-    build: ./services/trader
+    build:
+      context: .
+      dockerfile: services/trader/Dockerfile
     container_name: wb2-trader
     restart: always
     env_file: .env
