@@ -23,6 +23,7 @@ import datetime as dt
 from db import conn
 from kalshi_client import KalshiClient
 from executor import get_state
+from cooldown import add_cooldown
 
 
 TEST_TICKER = "TEST-POSITION-MANAGER"
@@ -167,6 +168,10 @@ def close_paper_position(row, exit_cents, reason, dry_run=True):
             SET status='CLOSED'
             WHERE ticker=? AND status='OPEN'
         """, (ticker,))
+
+    if reason == "SL":
+        cd = add_cooldown(ticker, side, reason="SL")
+        log_event("WARN", "cooldown", f"Cooldown added {ticker} {side} until {cd['expires_at']} after SL")
 
     log_event("INFO", "position_manager", msg)
     return {

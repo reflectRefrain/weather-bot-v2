@@ -12,6 +12,7 @@ RULES ENFORCED HERE:
 import datetime as dt, math, yaml, os
 from db import conn, init_db
 from reconcile import position_for, open_positions
+from cooldown import is_blocked
 
 CONFIG_PATH = os.getenv("CONFIG_PATH", "/app/config.yaml")
 
@@ -75,7 +76,9 @@ def can_enter(ticker: str, cfg: dict) -> tuple[bool, str]:
     if kill_switch_on():
         return False, "kill_switch_ON"
 
-    # Already have this ticker open
+    # Cooldown after stop-loss: do not revenge re-enter same ticker/side
+    # Side is checked in place_order() because can_enter() only receives ticker.
+    # Keep duplicate-ticker guard here.
     existing = position_for(ticker)
     if existing:
         return False, f"already_open:{ticker}"
@@ -101,6 +104,12 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
     kelly_usd = candidate["kelly_usd"]
 
     # Pre-flight checks
+    blocked = is_blocked(ticker, side)
+    if blocked:
+        reason = f"cooldown_until:{blocked['expires_at']}"
+        log_event("WARN", "cooldown", f"SKIP {ticker} {side} — {reason}")
+        return {"success": False, "reason": reason}
+
     ok, reason = can_enter(ticker, cfg)
     if not ok:
         log_event("INFO", "executor", f"SKIP {ticker} — {reason}")
