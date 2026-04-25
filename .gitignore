@@ -1,0 +1,8 @@
+.env
+data/kalshi_private.pem
+data/bot.db
+logs/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store

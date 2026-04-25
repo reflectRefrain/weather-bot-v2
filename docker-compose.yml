@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  trader:
+    build: ./services/trader
+    container_name: wb2-trader
+    restart: always
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config.yaml:/app/config.yaml
+    working_dir: /app
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3

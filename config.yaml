@@ -1,0 +1,82 @@
+# ─────────────────────────────────────────
+#  Weather Bot v2 — Master Config
+#  Edit this file to change any setting.
+#  Bot reloads config every cycle — no restart needed.
+# ─────────────────────────────────────────
+
+# Trading mode: paper = no real orders, live = real orders
+mode: paper
+
+# Bankroll
+bankroll_usd: 41.63
+
+# Risk controls
+risk:
+  daily_loss_limit_pct: 0.20       # Kill bot if down 20% in one day
+  max_open_positions: 5            # Max concurrent open positions
+  min_edge_cents: 8                # Min model edge over market mid (cents)
+  max_spread_cents: 12             # Skip markets with spread wider than this
+  min_entry_cents: 25              # Don't buy contracts cheaper than 25¢
+  max_entry_cents: 75              # Don't buy contracts more expensive than 75¢
+  kelly_fraction: 0.20             # Fraction of Kelly to use
+  min_trade_usd: 1.00              # Minimum order size in dollars
+  max_trade_usd: 2.00              # Maximum order size per trade
+  max_per_ticker_usd: 2.00         # Hard cap per ticker regardless of Kelly
+  min_balance_usd: 10.00           # Pause if balance drops below this
+  cancel_after_seconds: 120        # Cancel unfilled resting orders after 2 min
+
+# Loop timing
+loop_sleep_seconds: 60             # Seconds between each cycle
+scan_every_n_cycles: 5             # Re-scan Kalshi markets every N cycles
+
+# Markets to trade
+horizons:
+  - same_day
+  - next_day
+
+cities:
+  - code: NYC
+    lat: 40.7789
+    lon: -73.9692
+    metar: KNYC
+  - code: CHI
+    lat: 41.9803
+    lon: -87.9090
+    metar: KORD
+  - code: MIA
+    lat: 25.7959
+    lon: -80.2870
+    metar: KMIA
+  - code: LAX
+    lat: 33.9425
+    lon: -118.4081
+    metar: KLAX
+  - code: DEN
+    lat: 39.8561
+    lon: -104.6737
+    metar: KDEN
+  - code: BOS
+    lat: 42.3643
+    lon: -71.0052
+    metar: KBOS
+  - code: AUS
+    lat: 30.1945
+    lon: -97.6699
+    metar: KAUS
+  - code: PHIL
+    lat: 39.8729
+    lon: -75.2411
+    metar: KPHL
+  - code: HOU
+    lat: 29.9844
+    lon: -95.3414
+    metar: KHOU
+
+markets:
+  - HIGHTEMP
+  - LOWTEMP
+
+# Telegram
+telegram:
+  enabled: true
+  daily_summary_hour_utc: 5       # Send daily summary at 5 AM UTC (midnight CT)
