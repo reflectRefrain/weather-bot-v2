@@ -66,11 +66,6 @@ async def trader_loop():
                 await asyncio.sleep(sleep_sec)
                 continue
 
-            if not is_trading_hours():
-                log("Outside trading hours (6AM-9PM ET) — sleeping")
-                await asyncio.sleep(sleep_sec)
-                continue
-
             init_day_balance(k)
 
             if daily_loss_check(k, cfg):
@@ -96,6 +91,11 @@ async def trader_loop():
                     )
 
             cancel_stale_orders(k, cfg)
+
+            if not is_trading_hours():
+                log("Outside trading hours (6AM-9PM ET) — managed positions only; no new entries")
+                await asyncio.sleep(sleep_sec)
+                continue
 
             if cycle % scan_every_n == 0:
                 log("Scanning markets...")
