@@ -133,12 +133,14 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
     if mode == "paper":
         log_event("INFO", "executor",
                   f"PAPER BUY {ticker} {side} x{qty} @ {price_c}c = ${cost_usd:.2f}")
+        tp = min(99, price_c + max(10, int(round(candidate["edge_cents"]))))
+        sl = max(1,  price_c - max(5,  int(round(candidate["edge_cents"] * 0.5))))
         with conn() as c:
             c.execute("""
                 INSERT OR REPLACE INTO positions
-                    (ticker, side, qty, avg_price_cents, opened_at, status)
-                VALUES (?, ?, ?, ?, ?, 'OPEN')
-            """, (ticker, side, qty, price_c, dt.datetime.utcnow().isoformat()))
+                    (ticker, side, qty, avg_price_cents, opened_at, tp_price, sl_price, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN')
+            """, (ticker, side, qty, price_c, dt.datetime.utcnow().isoformat(), tp, sl))
         return {"success": True, "order_id": f"paper-{ticker}", "qty": qty,
                 "cost_usd": cost_usd, "mode": "paper"}
 

@@ -24,6 +24,19 @@ def spread(yes_bid, yes_ask) -> Optional[float]:
         return None
     return yes_ask - yes_bid
 
+def cents(m: dict, key: str) -> Optional[int]:
+    """
+    Kalshi may return either cent fields (yes_bid) or dollar-string fields
+    (yes_bid_dollars). Normalize both to integer cents.
+    """
+    v = m.get(key)
+    if v is not None:
+        return int(round(float(v)))
+    dv = m.get(key + "_dollars")
+    if dv is not None:
+        return int(round(float(dv) * 100))
+    return None
+
 def gaussian_prob(forecast_f: float, strike: float, sigma: float = 4.0) -> float:
     """
     P(actual >= strike) using normal distribution around forecast.
@@ -114,31 +127,31 @@ def scan(kalshi_client, noaa_client, metar_client,
     min_usd    = risk["min_trade_usd"]
     max_usd    = risk["max_trade_usd"]
 
-    # Fetch all open markets from Kalshi
-    markets = []
+    # Fetch weather markets directly by Kalshi weather series.
+    # Global /markets pages are often dominated by sports and may not include weather.
+    series_list = [
+        "KXHIGHNY",
+        "KXHIGHLAX",
+        "KXHIGHCHI",
+        "KXHIGHMIA",
+        "KXHIGHDEN",
+        "KXHIGHAUS",
+        "KXHIGHPHIL",
+        "KXHIGHBOS",
+    ]
+
+    weather = []
     try:
-        cursor = None
-        for _ in range(10):   # max 10 pages
-            resp = kalshi_client.get_markets(status="open", limit=200, cursor=cursor)
-            page = resp.get("markets", [])
-            markets.extend(page)
-            cursor = resp.get("cursor")
-            if not cursor or not page:
-                break
+        for series in series_list:
+            resp = kalshi_client.get_markets(series_ticker=series, status="open", limit=200)
+            weather.extend(resp.get("markets", []))
     except Exception as e:
         return [{"error": str(e)}]
 
-    # Filter to weather markets only
-    weather = []
-    for m in markets:
-        t = m.get("ticker", "")
-        if any(t.startswith(s) for s in SERIES):
-            weather.append(m)
-
     for m in weather:
         ticker     = m.get("ticker", "")
-        yes_bid    = m.get("yes_bid")
-        yes_ask    = m.get("yes_ask")
+        yes_bid    = cents(m, "yes_bid")
+        yes_ask    = cents(m, "yes_ask")
         tgt_date   = target_date_from_ticker(ticker)
         strike_info = parse_strike(ticker)
 

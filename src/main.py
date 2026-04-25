@@ -74,11 +74,15 @@ async def trader_loop():
                 await asyncio.sleep(sleep_sec)
                 continue
 
-            result = sync(k)
-            if result.get("error"):
-                log(f"Reconcile error: {result['error']}")
+            mode = get_state("mode") or cfg.get("mode", "paper")
+            if mode == "paper":
+                log("Paper mode — skipping live reconcile")
             else:
-                log(f"Reconcile: {result['synced']} open, {result['cleared']} cleared")
+                result = sync(k)
+                if result.get("error"):
+                    log(f"Reconcile error: {result['error']}")
+                else:
+                    log(f"Reconcile: {result['synced']} open, {result['cleared']} cleared")
 
             pm_results = manage_positions(k, dry_run=False)
             for pm in pm_results:
