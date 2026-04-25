@@ -9,3 +9,7 @@ __pycache__/
 
 # Generated report exports
 data/exports/
+
+# SQLite runtime files
+data/*.db-shm
+data/*.db-wal
