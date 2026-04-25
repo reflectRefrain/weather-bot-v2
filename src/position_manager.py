@@ -190,7 +190,8 @@ def decision_for_position(row, exit_price_cents):
     tp = row["tp_price"]
     sl = row["sl_price"]
 
-    if exit_price_cents is None:
+    # Treat 0 or 1 cent as stale/bad market data — never SL on missing price
+    if exit_price_cents is None or exit_price_cents <= 1:
         return "HOLD", "no_exit_price"
 
     if tp is not None and exit_price_cents >= int(tp):
