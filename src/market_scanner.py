@@ -7,7 +7,7 @@ from model import sigma_for, yes_prob, market_mid_prob
 CITY_CODES = {
     "NYC": ["NY", "NYC"], "LAX": ["LAX", "LA"], "CHI": ["CHI"],
     "MIA": ["MIA"], "DEN": ["DEN"], "AUS": ["AUS"],
-    "PHIL": ["PHIL"], "BOS": ["BOS"],
+    "PHIL": ["PHIL"], "BOS": ["BOS"], "HOU": ["HOU"],
 }
 
 VAR_PREFIX = {
@@ -67,7 +67,6 @@ def parse_strike(ticker: str) -> dict:
         # Below threshold: B65
         m = re.match(r'^B(\d+\.?\d*)$', sp)
         if m:
-            # YES = below; we treat as "above" the complement for model
             return {"type": "above", "value": float(m.group(1)), "floor": None, "cap": None, "_below": True}
         # Bare number
         m = re.match(r'^(\d+\.?\d*)$', sp)
@@ -86,7 +85,6 @@ def target_date_from_ticker(ticker: str):
     except Exception:
         pass
     try:
-        # alternate: YYYYMMDD
         parts = ticker.split("-")
         raw = parts[1]
         return dt.datetime.strptime(raw, "%Y%m%d").strftime("%Y-%m-%d")
