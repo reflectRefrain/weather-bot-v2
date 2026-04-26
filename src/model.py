@@ -1,0 +1,50 @@
+"""Probability helpers used by market_scanner and executor."""
+from statistics import NormalDist
+
+SIGMA = {
+    "HIGHTEMP":  {"same_day": 1.3, "next_day": 1.8, "weekly": 4.0},
+    "LOWTEMP":   {"same_day": 1.3, "next_day": 1.8, "weekly": 4.0},
+    "RAIN":      {"same_day": 0.10, "next_day": 0.18, "weekly": 0.35},
+    "SNOW":      {"same_day": 0.35, "next_day": 0.60, "weekly": 1.20},
+    "WINDSPEED": {"same_day": 2.0,  "next_day": 3.0,  "weekly": 5.0},
+}
+
+
+def sigma_for(variable: str, horizon: str) -> float:
+    v = SIGMA.get(variable, {"same_day": 2.0, "next_day": 3.0, "weekly": 5.0})
+    return v.get(horizon, v["next_day"])
+
+
+def yes_prob(
+    forecast: float,
+    sigma: float,
+    strike_type: str,
+    floor_strike,
+    cap_strike,
+) -> float | None:
+    """Return P(YES) for above / less / between strike types."""
+    if forecast is None or sigma is None or sigma <= 0:
+        return None
+    nd = NormalDist(mu=forecast, sigma=sigma)
+    st = (strike_type or "").lower()
+
+    if st in ("above", "greater") and floor_strike is not None:
+        return max(0.0, min(1.0, 1.0 - nd.cdf(float(floor_strike))))
+
+    if st in ("below", "less") and cap_strike is not None:
+        return max(0.0, min(1.0, nd.cdf(float(cap_strike))))
+
+    if st == "between" and floor_strike is not None and cap_strike is not None:
+        return max(
+            0.0,
+            min(1.0, nd.cdf(float(cap_strike)) - nd.cdf(float(floor_strike) - 1e-9)),
+        )
+
+    return None
+
+
+def market_mid_prob(yes_bid_cents, yes_ask_cents) -> float | None:
+    """Convert bid/ask cents to mid implied probability."""
+    if yes_bid_cents is None or yes_ask_cents is None:
+        return None
+    return ((yes_bid_cents + yes_ask_cents) / 2.0) / 100.0
