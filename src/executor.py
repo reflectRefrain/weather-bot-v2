@@ -70,20 +70,14 @@ def daily_loss_check(kalshi_client, cfg) -> bool:
 def can_enter(ticker: str, cfg: dict) -> tuple[bool, str]:
     """
     Returns (True, '') if safe to enter, or (False, reason) if blocked.
-    This is the duplicate-entry and position-cap guard.
     """
-    # Kill switch
     if kill_switch_on():
         return False, "kill_switch_ON"
 
-    # Cooldown after stop-loss: do not revenge re-enter same ticker/side
-    # Side is checked in place_order() because can_enter() only receives ticker.
-    # Keep duplicate-ticker guard here.
     existing = position_for(ticker)
     if existing:
         return False, f"already_open:{ticker}"
 
-    # Position cap
     open_pos = open_positions()
     max_pos  = cfg["risk"]["max_open_positions"]
     if len(open_pos) >= max_pos:
@@ -98,10 +92,22 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
     Returns dict with success, order_id, reason
     """
     init_db()
-    ticker    = candidate["ticker"]
-    side      = candidate["side"]
-    price_c   = candidate["price_cents"]
-    kelly_usd = candidate["kelly_usd"]
+    ticker  = candidate["ticker"]
+    side    = candidate["side"]
+    price_c = candidate["price_cents"]
+    p       = candidate["model_prob"]
+
+    # Compute Kelly sizing inline
+    bankroll = float(cfg.get("bankroll_usd", 100))
+    b        = (100 - price_c) / price_c if price_c < 100 else 0.0
+    f_raw    = max(0.0, (p * b - (1 - p)) / b) if b > 0 else 0.0
+    f_scaled = f_raw * float(cfg["risk"].get("kelly_fraction", 0.25))
+    kelly_usd = min(
+        f_scaled * bankroll,
+        float(cfg["risk"].get("max_trade_usd", 2.0)),
+        float(cfg["risk"].get("max_per_ticker_usd", 2.0))
+    )
+    kelly_usd = max(kelly_usd, float(cfg["risk"].get("min_trade_usd", 1.0)))
 
     # Pre-flight checks
     blocked = is_blocked(ticker, side)
