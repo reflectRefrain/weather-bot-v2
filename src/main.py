@@ -50,7 +50,7 @@ async def trader_loop():
 
     set_state("mode", cfg.get("mode", "paper"))
     log(f"Starting in {cfg.get('mode','paper').upper()} mode")
-    await notify(f"🤖 Weather Bot v2 started\nMode: {cfg.get('mode','paper').upper()}")
+    await notify("Weather Bot v2 started\nMode: " + cfg.get('mode','paper').upper())
 
     sleep_sec    = cfg.get("loop_sleep_seconds", 60)
     scan_every_n = cfg.get("scan_every_n_cycles", 5)
@@ -59,24 +59,24 @@ async def trader_loop():
         try:
             cfg   = load_config()
             cycle += 1
-            log(f"Cycle {cycle} — kill={'ON' if kill_switch_on() else 'OFF'} mode={get_state('mode')}")
+            log(f"Cycle {cycle} - kill={'ON' if kill_switch_on() else 'OFF'} mode={get_state('mode')}")
 
             if kill_switch_on():
-                log("Kill switch ON — skipping cycle")
+                log("Kill switch ON - skipping cycle")
                 await asyncio.sleep(sleep_sec)
                 continue
 
             init_day_balance(k)
 
             if daily_loss_check(k, cfg):
-                log("Daily loss limit hit — kill switch activated")
-                await notify("🔴 Daily loss limit hit — bot paused automatically")
+                log("Daily loss limit hit - kill switch activated")
+                await notify("Daily loss limit hit - bot paused automatically")
                 await asyncio.sleep(sleep_sec)
                 continue
 
             mode = get_state("mode") or cfg.get("mode", "paper")
             if mode == "paper":
-                log("Paper mode — skipping live reconcile")
+                log("Paper mode - skipping live reconcile")
             else:
                 result = sync(k)
                 if result.get("error"):
@@ -97,7 +97,7 @@ async def trader_loop():
             cancel_stale_orders(k, cfg)
 
             if not is_trading_hours():
-                log("Outside trading hours (6AM-9PM ET) — managed positions only; no new entries")
+                log("Outside trading hours (6AM-9PM ET) - managed positions only; no new entries")
                 await asyncio.sleep(sleep_sec)
                 continue
 
@@ -110,17 +110,20 @@ async def trader_loop():
                 elif not candidates:
                     log("No candidates found")
                 else:
-                    log(f"Found {len(candidates)} — best edge: {candidates[0]['edge_cents']}c")
+                    log(f"Found {len(candidates)} - best edge: {candidates[0]['edge_cents']}c")
                     best   = candidates[0]
                     result = place_order(k, best, cfg)
                     if result["success"]:
+                        trade_type = "PAPER" if result["mode"] == "paper" else "LIVE"
                         msg = (
-                            f"{'\ud83d\udcc4' if result['mode']=='paper' else '\ud83d\udcb0'} "
-                            f"{'PAPER' if result['mode']=='paper' else 'LIVE'} TRADE\n"
-                            f"{best['ticker']}\n"
-                            f"{best['side'].upper()} x{result['qty']} @ {best['price_cents']}¢\n"
-                            f"Edge: {best['edge_cents']}¢  Size: ${result['cost_usd']:.2f}\n"
-                            f"Forecast: {best['forecast_f']}°F  Obs: {best['obs_f']}°F"
+                            trade_type + " TRADE\n"
+                            + best["ticker"] + "\n"
+                            + best["side"].upper() + " x" + str(result["qty"])
+                            + " @ " + str(best["price_cents"]) + "c\n"
+                            + "Edge: " + str(best["edge_cents"]) + "c"
+                            + "  Size: $" + str(round(result["cost_usd"], 2)) + "\n"
+                            + "Forecast: " + str(best["forecast_f"]) + "F"
+                            + "  Obs: " + str(best["obs_f"]) + "F"
                         )
                         log(msg.replace("\n", " | "))
                         await notify(msg)
