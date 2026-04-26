@@ -56,12 +56,9 @@ def build_series_list(cfg):
 
 def parse_strike(ticker: str) -> dict:
     """
-    Returns dict with keys: type, value, floor, cap
+    Returns dict with keys: type, value, floor, cap, _below
     type: 'above' | 'between' | 'unknown'
-    Examples:
-      KXHIGHNY-26APR25-T65     -> above, value=65
-      KXHIGHNY-26APR25-B65     -> above (NO side = below), value=65, _below=True
-      KXHIGHNY-26APR25-R64T66  -> between, floor=64, cap=66
+    B-prefix tickers: YES means high BELOW strike -> _below=True
     """
     try:
         parts = ticker.split("-")
@@ -153,7 +150,7 @@ def scan(kalshi_client, noaa_client, metar_client,
     max_spread      = risk["max_spread_cents"]
     min_price       = risk["min_entry_cents"]
     max_price       = risk["max_entry_cents"]
-    start_hour      = risk.get("trade_start_hour_local", 6)  # default 6 AM
+    start_hour      = risk.get("trade_start_hour_local", 6)
     now_local_hour  = local_hour()
     trading_open    = now_local_hour >= start_hour
 
@@ -224,6 +221,13 @@ def scan(kalshi_client, noaa_client, metar_client,
         if sp is not None and sp > max_spread:
             continue
 
+        # Skip B-ticker YES side entirely.
+        # B-tickers mean YES = high BELOW strike. The yes_ask on these is the
+        # cheap (low-probability) side and produces inflated model edge because
+        # the model sees forecast << strike and assigns near-certain probability.
+        # Only trade the NO side of B-tickers (equivalent to betting high ABOVE strike).
+        is_below_ticker = bool(strike_info.get("_below"))
+
         # Determine horizon
         horizon = "next_day"
         if tgt_date:
@@ -239,7 +243,7 @@ def scan(kalshi_client, noaa_client, metar_client,
         if horizon == "same_day" and not trading_open:
             continue
 
-        # Get forecast with target_date so NOAA returns the right day
+        # Get forecast
         try:
             if variable == "HIGHTEMP":
                 forecast = noaa_client.high_f(city_cfg["lat"], city_cfg["lon"], target_date=tgt_date)
@@ -259,6 +263,10 @@ def scan(kalshi_client, noaa_client, metar_client,
             obs_f = None
 
         for side in ("yes", "no"):
+            # Skip YES side on B-tickers — only trade NO (high ABOVE strike)
+            if is_below_ticker and side == "yes":
+                continue
+
             price_c = yes_ask if side == "yes" else 100 - yes_bid
 
             if not (min_price <= price_c <= max_price):
