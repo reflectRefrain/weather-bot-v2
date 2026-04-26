@@ -5,7 +5,7 @@
 # ─────────────────────────────────────────
 
 # Trading mode: paper = no real orders, live = real orders
-mode: paper
+mode: live
 
 # Bankroll
 bankroll_usd: 41.63
