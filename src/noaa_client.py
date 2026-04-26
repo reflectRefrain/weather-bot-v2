@@ -91,6 +91,22 @@ class NoaaClient:
         out["fetched_at"] = dt.datetime.utcnow().isoformat()
         return out
 
+    def high_f(self, lat, lon, target_date=None):
+        """Convenience: next daytime high in F."""
+        return self.summary(lat, lon, target_date=target_date).get("high_f")
+
+    def low_f(self, lat, lon, target_date=None):
+        """Convenience: next overnight low in F."""
+        return self.summary(lat, lon, target_date=target_date).get("low_f")
+
+    def is_available(self, lat, lon):
+        """Quick health check."""
+        try:
+            self._points(lat, lon)
+            return True
+        except Exception:
+            return False
+
 if __name__ == "__main__":
     c = NoaaClient()
     s = c.summary(40.7789, -73.9692)
