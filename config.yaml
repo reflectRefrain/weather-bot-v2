@@ -16,14 +16,17 @@ risk:
   max_open_positions: 5            # Max concurrent open positions
   min_edge_cents: 5                # Min model edge over market mid (cents)
   max_spread_cents: 15             # Skip markets with spread wider than this
-  min_entry_cents: 5              # Don't buy contracts cheaper than 25¢
-  max_entry_cents: 95              # Don't buy contracts more expensive than 75¢
+  min_entry_cents: 8               # Skip stale overnight markets (< 8¢ bid)
+  max_entry_cents: 95              # Don't buy contracts more expensive than 95¢
   kelly_fraction: 0.20             # Fraction of Kelly to use
   min_trade_usd: 1.00              # Minimum order size in dollars
   max_trade_usd: 2.00              # Maximum order size per trade
   max_per_ticker_usd: 2.00         # Hard cap per ticker regardless of Kelly
   min_balance_usd: 10.00           # Pause if balance drops below this
   cancel_after_seconds: 120        # Cancel unfilled resting orders after 2 min
+  # Time gate: only trade same_day markets after this local hour (CDT = UTC-5)
+  # Overnight Kalshi prices are stale — markets reprice after ~6 AM local
+  trade_start_hour_local: 6
 
 # Loop timing
 loop_sleep_seconds: 60             # Seconds between each cycle
