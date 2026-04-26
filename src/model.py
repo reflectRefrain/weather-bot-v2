@@ -10,6 +10,11 @@ SIGMA = {
     "WINDSPEED": {"same_day": 5.0,  "next_day": 8.0,  "weekly": 15.0},
 }
 
+# Minimum sigma floor — prevents model from giving near-certainty on same-day
+# trades where NOAA forecast is close to the strike but still uncertain.
+# 1.5 was too tight; real intraday temp variance is 3-4°F minimum.
+SIGMA_FLOOR = 3.0
+
 
 def sigma_for(variable: str, horizon: str, target_date: str = None) -> float:
     """
@@ -26,7 +31,7 @@ def sigma_for(variable: str, horizon: str, target_date: str = None) -> float:
         local_hour = (now_utc.hour - 5) % 24
         # Shrink linearly from full sigma at midnight -> 30% at 6pm (hour 18)
         frac = min(1.0, local_hour / 18.0)
-        base = max(1.5, base * (1.0 - 0.6 * frac))
+        base = max(SIGMA_FLOOR, base * (1.0 - 0.6 * frac))
 
     return base
 
