@@ -1,34 +1,99 @@
-"""
-Market Scanner — finds Kalshi weather markets and scores them.
-Returns a list of candidate trades with edge calculations.
-"""
-import datetime as dt, yaml, math
-from typing import Optional
+"""Scanner v2: pulls Kalshi weather markets, persists strike_type, prices, target_date."""
+import datetime as dt, re, yaml
+from db import conn
+from kalshi_client import KalshiClient
+from model import sigma_for, yes_prob, market_mid_prob
 
-SERIES = [
-    "HIGHTEMP", "LOWTEMP",
-    "KXHIGH", "KXLOW",
-]
+CITY_CODES = {
+    "NYC": ["NY", "NYC"], "LAX": ["LAX", "LA"], "CHI": ["CHI"],
+    "MIA": ["MIA"], "DEN": ["DEN"], "AUS": ["AUS"],
+    "PHIL": ["PHIL"], "BOS": ["BOS"],
+}
 
-def load_config(path="/app/config.yaml") -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
+VAR_PREFIX = {
+    "HIGHTEMP": ["KXHIGH"], "LOWTEMP": ["KXLOW"],
+    "RAIN": ["KXRAIN"], "SNOW": ["KXSNOW"],
+    "WINDSPEED": ["KXHIGHWIND", "KXWIND"],
+}
 
-def mid(yes_bid, yes_ask) -> Optional[float]:
-    if yes_bid is None or yes_ask is None:
-        return None
-    return (yes_bid + yes_ask) / 2.0
+MONTHS = {m: i + 1 for i, m in enumerate(["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"])}
 
-def spread(yes_bid, yes_ask) -> Optional[float]:
-    if yes_bid is None or yes_ask is None:
-        return None
-    return yes_ask - yes_bid
+def log_event(level, module, message):
+    with conn() as c:
+        c.execute(
+            "INSERT INTO events(ts,level,module,message) VALUES(?,?,?,?)",
+            (dt.datetime.utcnow().isoformat(), level, module, message),
+        )
 
-def cents(m: dict, key: str) -> Optional[int]:
+def build_series_list(cfg):
+    cities = [c["code"] for c in cfg["cities"]]
+    series = []
+    for var in cfg["markets"]:
+        for pref in VAR_PREFIX.get(var, []):
+            for our in cities:
+                for kc in CITY_CODES.get(our, [our]):
+                    series.append((var, our, pref + kc))
+                    if pref in ("KXRAIN", "KXSNOW"):
+                        series.append((var, our, pref + kc + "M"))
+    seen = set()
+    out = []
+    for row in series:
+        if row[2] in seen:
+            continue
+        seen.add(row[2])
+        out.append(row)
+    return out
+
+def parse_strike(ticker: str) -> dict:
     """
-    Kalshi may return either cent fields (yes_bid) or dollar-string fields
-    (yes_bid_dollars). Normalize both to integer cents.
+    Returns dict with keys: type, value, floor, cap
+    type: 'above' | 'between' | 'unknown'
+    Examples:
+      KXHIGHNY-26APR25-T65     -> above, value=65
+      KXHIGHNY-26APR25-B65     -> above (NO side = below), value=65
+      KXHIGHNY-26APR25-R64T66  -> between, floor=64, cap=66
     """
+    try:
+        parts = ticker.split("-")
+        sp = parts[-1]
+        # Between: starts with digit, contains T separator, e.g. 64T66 or R64T66
+        m = re.match(r'^R?(\d+\.?\d*)T(\d+\.?\d*)$', sp)
+        if m:
+            return {"type": "between", "floor": float(m.group(1)), "cap": float(m.group(2)), "value": None}
+        # Above threshold: T65 or just 65 (Kalshi uses T for >=)
+        m = re.match(r'^T(\d+\.?\d*)$', sp)
+        if m:
+            return {"type": "above", "value": float(m.group(1)), "floor": None, "cap": None}
+        # Below threshold: B65
+        m = re.match(r'^B(\d+\.?\d*)$', sp)
+        if m:
+            # YES = below; we treat as "above" the complement for model
+            return {"type": "above", "value": float(m.group(1)), "floor": None, "cap": None, "_below": True}
+        # Bare number
+        m = re.match(r'^(\d+\.?\d*)$', sp)
+        if m:
+            return {"type": "above", "value": float(m.group(1)), "floor": None, "cap": None}
+    except Exception:
+        pass
+    return {"type": "unknown"}
+
+def target_date_from_ticker(ticker: str):
+    """Extract YYYY-MM-DD from e.g. KXHIGHNY-26APR25-T65"""
+    try:
+        parts = ticker.split("-")
+        raw = parts[1]
+        return dt.datetime.strptime(raw, "%d%b%y").strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    try:
+        # alternate: YYYYMMDD
+        parts = ticker.split("-")
+        raw = parts[1]
+        return dt.datetime.strptime(raw, "%Y%m%d").strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+def cents(m: dict, key: str):
     v = m.get(key)
     if v is not None:
         return int(round(float(v)))
@@ -37,151 +102,133 @@ def cents(m: dict, key: str) -> Optional[int]:
         return int(round(float(dv) * 100))
     return None
 
-def gaussian_prob(forecast_f: float, strike: float, sigma: float = 4.0) -> float:
-    """
-    P(actual >= strike) using normal distribution around forecast.
-    sigma=4.0 is a conservative default (typical NWS MAE is 3-5F).
-    """
-    from statistics import NormalDist
-    dist = NormalDist(mu=forecast_f, sigma=sigma)
-    return 1.0 - dist.cdf(strike)
-
-def edge_cents(model_prob: float, market_mid_cents: float, side: str) -> float:
-    """
-    Edge = model probability - market implied probability, in cents.
-    side='yes': we buy YES if model says higher prob than market
-    side='no':  we buy NO  if model says lower  prob than market
-    """
-    market_prob = market_mid_cents / 100.0
-    if side == "yes":
-        return (model_prob - market_prob) * 100
-    else:
-        return ((1 - model_prob) - (1 - market_prob)) * 100
-
-def kelly_size(edge_c: float, price_c: float, bankroll: float,
-               kelly_fraction: float = 0.20,
-               min_usd: float = 1.0, max_usd: float = 2.0) -> float:
-    """
-    Fractional Kelly sizing.
-    Returns dollar amount to bet, clamped to [min_usd, max_usd].
-    """
-    if price_c <= 0 or price_c >= 100:
-        return 0.0
-    p   = price_c / 100.0
-    q   = 1.0 - p
-    b   = (100 - price_c) / price_c   # net odds
-    k   = (b * p - q) / b
-    raw = bankroll * kelly_fraction * max(k, 0)
-    return max(min_usd, min(max_usd, raw))
-
-def parse_strike(ticker: str) -> dict:
-    """
-    Extract strike info from ticker string.
-    e.g. KXHIGHNY-26APR25-B65.5 -> {type:'below', value:65.5}
-         KXHIGHNY-26APR25-T65.5 -> {type:'above', value:65.5}
-         KXHIGHNY-26APR25-R64T66 -> {type:'range', low:64, high:66}
-    """
-    try:
-        parts = ticker.split("-")
-        strike_part = parts[-1]
-        if strike_part.startswith("B"):
-            return {"type": "below", "value": float(strike_part[1:])}
-        elif strike_part.startswith("T"):
-            return {"type": "above", "value": float(strike_part[1:])}
-        elif "T" in strike_part and strike_part[0] == "R":
-            lo, hi = strike_part[1:].split("T")
-            return {"type": "range", "low": float(lo), "high": float(hi)}
-    except Exception:
-        pass
-    return {"type": "unknown"}
-
-def target_date_from_ticker(ticker: str) -> Optional[str]:
-    """Extract YYYY-MM-DD from ticker like KXHIGHNY-26APR25-B65"""
-    try:
-        parts = ticker.split("-")
-        raw = parts[1]   # e.g. 26APR25
-        return dt.datetime.strptime(raw, "%y%b%d").strftime("%Y-%m-%d")
-    except Exception:
+def spread_c(yes_bid, yes_ask):
+    if yes_bid is None or yes_ask is None:
         return None
+    return yes_ask - yes_bid
+
+def upsert_market(ticker, series_ticker, variable, city, strike_type,
+                  floor_strike, cap_strike, value_strike, tgt_date,
+                  yes_bid, yes_ask, status="open"):
+    with conn() as c:
+        c.execute("""
+            INSERT INTO markets
+                (ticker, series_ticker, variable, city,
+                 strike_type, floor_strike, cap_strike, value_strike,
+                 target_date, yes_bid, yes_ask, status, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(ticker) DO UPDATE SET
+                yes_bid=excluded.yes_bid,
+                yes_ask=excluded.yes_ask,
+                status=excluded.status,
+                updated_at=excluded.updated_at
+        """, (
+            ticker, series_ticker, variable, city,
+            strike_type, floor_strike, cap_strike, value_strike,
+            tgt_date, yes_bid, yes_ask, status,
+            dt.datetime.utcnow().isoformat()
+        ))
 
 def scan(kalshi_client, noaa_client, metar_client,
          config_path="/app/config.yaml") -> list:
     """
-    Main scan — returns list of candidate dicts, best edge first.
-    Each candidate:
-      ticker, series, city, side, price_cents, model_prob,
-      market_prob, edge_cents, kelly_usd, strike, forecast_f,
-      obs_f, reason
+    Scanner v2 main entry.
+    Returns list of candidate dicts sorted by edge_cents desc.
     """
-    cfg       = load_config(config_path)
-    risk      = cfg["risk"]
-    cities    = {c["code"]: c for c in cfg["cities"]}
-    candidates = []
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
 
+    risk       = cfg["risk"]
+    cities_cfg = {c["code"]: c for c in cfg["cities"]}
     min_edge   = risk["min_edge_cents"]
     max_spread = risk["max_spread_cents"]
     min_price  = risk["min_entry_cents"]
     max_price  = risk["max_entry_cents"]
-    bankroll   = cfg["bankroll_usd"]
-    kelly_f    = risk["kelly_fraction"]
-    min_usd    = risk["min_trade_usd"]
-    max_usd    = risk["max_trade_usd"]
 
-    # Fetch weather markets directly by Kalshi weather series.
-    # Global /markets pages are often dominated by sports and may not include weather.
-    series_list = [
-        "KXHIGHNY",
-        "KXHIGHLAX",
-        "KXHIGHCHI",
-        "KXHIGHMIA",
-        "KXHIGHDEN",
-        "KXHIGHAUS",
-        "KXHIGHPHIL",
-        "KXHIGHBOS",
-    ]
+    series_list = build_series_list(cfg)
+    log_event("INFO", "scanner", f"Scanning {len(series_list)} series")
 
-    weather = []
-    try:
-        for series in series_list:
-            resp = kalshi_client.get_markets(series_ticker=series, status="open", limit=200)
-            weather.extend(resp.get("markets", []))
-    except Exception as e:
-        return [{"error": str(e)}]
+    collected = []
+    for (variable, city_code, series_ticker) in series_list:
+        try:
+            resp = kalshi_client.get_markets(
+                series_ticker=series_ticker, status="open", limit=200
+            )
+            mlist = resp.get("markets", [])
+        except Exception as e:
+            log_event("WARN", "scanner", f"{series_ticker}: {e}")
+            continue
+        for m in mlist:
+            m["_variable"]   = variable
+            m["_city_code"]  = city_code
+            m["_series_ticker"] = series_ticker
+        collected.extend(mlist)
 
-    for m in weather:
+    log_event("INFO", "scanner", f"Collected {len(collected)} raw markets")
+
+    # Enrich with strike info, prices, target date
+    enriched = 0
+    for m in collected:
+        ticker = m.get("ticker", "")
+        yb = cents(m, "yes_bid")
+        ya = cents(m, "yes_ask")
+        tgt_date = target_date_from_ticker(ticker)
+        si = parse_strike(ticker)
+
+        upsert_market(
+            ticker         = ticker,
+            series_ticker  = m["_series_ticker"],
+            variable       = m["_variable"],
+            city           = m["_city_code"],
+            strike_type    = si["type"],
+            floor_strike   = si.get("floor"),
+            cap_strike     = si.get("cap"),
+            value_strike   = si.get("value"),
+            tgt_date       = tgt_date,
+            yes_bid        = yb,
+            yes_ask        = ya,
+        )
+        enriched += 1
+
+    log_event("INFO", "scanner", f"Enriched {enriched} markets")
+
+    # Score candidates
+    candidates = []
+    for m in collected:
         ticker     = m.get("ticker", "")
-        yes_bid    = cents(m, "yes_bid")
-        yes_ask    = cents(m, "yes_ask")
-        tgt_date   = target_date_from_ticker(ticker)
+        variable   = m["_variable"]
+        city_code  = m["_city_code"]
+        city_cfg   = cities_cfg.get(city_code)
+        if not city_cfg:
+            continue
+
+        yes_bid = cents(m, "yes_bid")
+        yes_ask = cents(m, "yes_ask")
+        tgt_date = target_date_from_ticker(ticker)
         strike_info = parse_strike(ticker)
 
         if strike_info["type"] == "unknown":
             continue
         if yes_bid is None or yes_ask is None:
             continue
-        if spread(yes_bid, yes_ask) > max_spread:
-            continue
-
-        # Match city from ticker
-        city_code = None
-        city_cfg  = None
-        for code, cfg_city in cities.items():
-            if code.upper() in ticker.upper():
-                city_code = code
-                city_cfg  = cfg_city
-                break
-        if not city_cfg:
+        sp = spread_c(yes_bid, yes_ask)
+        if sp is not None and sp > max_spread:
             continue
 
         # Get forecast
         try:
-            forecast = noaa_client.high_f(city_cfg["lat"], city_cfg["lon"])
+            if variable == "HIGHTEMP":
+                forecast = noaa_client.high_f(city_cfg["lat"], city_cfg["lon"])
+            elif variable == "LOWTEMP":
+                forecast = noaa_client.low_f(city_cfg["lat"], city_cfg["lon"])
+            else:
+                forecast = noaa_client.high_f(city_cfg["lat"], city_cfg["lon"])
             if forecast is None:
                 continue
         except Exception:
             continue
 
-        # Get live METAR obs
+        # Get live obs
         try:
             obs_f = metar_client.temp_f(city_cfg["metar"])
         except Exception:
@@ -190,47 +237,74 @@ def scan(kalshi_client, noaa_client, metar_client,
         # Score both YES and NO sides
         for side in ("yes", "no"):
             if side == "yes":
-                price_c = yes_ask   # we'd pay the ask to buy YES
+                price_c = yes_ask
             else:
-                price_c = 100 - yes_bid  # NO price = 100 - yes_bid
+                price_c = 100 - yes_bid
 
             if not (min_price <= price_c <= max_price):
                 continue
 
-            strike_val = strike_info.get("value") or strike_info.get("high")
+            strike_val = strike_info.get("value") or strike_info.get("cap")
             if strike_val is None:
                 continue
 
-            if strike_info["type"] == "above":
-                model_p = gaussian_prob(forecast, strike_val)
-            elif strike_info["type"] == "below":
-                model_p = 1.0 - gaussian_prob(forecast, strike_val)
-            else:
-                continue   # skip range for now
+            # Determine horizon
+            horizon = "next_day"
+            if tgt_date:
+                delta = (dt.date.fromisoformat(tgt_date) - dt.datetime.utcnow().date()).days
+                if delta <= 0:
+                    horizon = "same_day"
+                elif delta == 1:
+                    horizon = "next_day"
+                else:
+                    horizon = "weekly"
 
-            ec = edge_cents(model_p, mid(yes_bid, yes_ask), side)
+            sigma = sigma_for(variable, horizon)
+            st    = strike_info["type"]
+            floor = strike_info.get("floor")
+            cap   = strike_info.get("cap")
+            val   = strike_info.get("value")
+            fs    = floor if floor is not None else val
+            cs    = cap
+
+            model_p = yes_prob(forecast, sigma, st, fs, cs)
+            if model_p is None:
+                continue
+
+            # For B-type (below) tickers, YES means below => invert
+            if strike_info.get("_below"):
+                model_p = 1.0 - model_p
+
+            market_p = market_mid_prob(yes_bid, yes_ask)
+            if market_p is None:
+                continue
+
+            if side == "yes":
+                ec = (model_p - market_p) * 100
+            else:
+                ec = ((1 - model_p) - (1 - market_p)) * 100
+
             if ec < min_edge:
                 continue
 
-            kelly_usd = kelly_size(ec, price_c, bankroll, kelly_f, min_usd, max_usd)
-            if kelly_usd <= 0:
-                continue
-
             candidates.append({
-                "ticker":     ticker,
-                "side":       side,
+                "ticker":      ticker,
+                "variable":    variable,
+                "city":        city_code,
+                "side":        side,
                 "price_cents": price_c,
                 "model_prob":  round(model_p, 4),
-                "market_prob": round(mid(yes_bid, yes_ask) / 100, 4),
+                "market_prob": round(market_p, 4),
                 "edge_cents":  round(ec, 2),
-                "kelly_usd":   round(kelly_usd, 2),
-                "strike":      strike_info,
                 "forecast_f":  forecast,
                 "obs_f":       obs_f,
                 "tgt_date":    tgt_date,
-                "spread_c":    spread(yes_bid, yes_ask),
+                "spread_c":    sp,
+                "horizon":     horizon,
+                "yes_bid":     yes_bid,
+                "yes_ask":     yes_ask,
             })
 
-    # Best edge first
     candidates.sort(key=lambda x: x["edge_cents"], reverse=True)
+    log_event("INFO", "scanner", f"Done: {len(collected)} markets, {enriched} enriched, {len(candidates)} candidates")
     return candidates
