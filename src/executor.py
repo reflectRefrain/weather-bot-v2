@@ -8,6 +8,7 @@ RULES ENFORCED HERE:
   5. Min balance guard
   6. Kill switch check before every order
   7. Cancel stale resting orders automatically
+  8. Block entry if resting order already exists for same ticker
 """
 import datetime as dt, math, yaml, os
 from db import conn, init_db
@@ -67,6 +68,15 @@ def daily_loss_check(kalshi_client, cfg) -> bool:
         log_event("ERROR", "executor", f"daily_loss_check failed: {e}")
     return False
 
+def resting_order_for(ticker: str) -> bool:
+    """Returns True if there is already a resting order for this ticker."""
+    with conn() as c:
+        row = c.execute(
+            "SELECT order_id FROM orders WHERE ticker=? AND status='resting' LIMIT 1",
+            (ticker,)
+        ).fetchone()
+    return row is not None
+
 def can_enter(ticker: str, cfg: dict) -> tuple[bool, str]:
     """
     Returns (True, '') if safe to enter, or (False, reason) if blocked.
@@ -77,6 +87,9 @@ def can_enter(ticker: str, cfg: dict) -> tuple[bool, str]:
     existing = position_for(ticker)
     if existing:
         return False, f"already_open:{ticker}"
+
+    if resting_order_for(ticker):
+        return False, f"resting_order_exists:{ticker}"
 
     open_pos = open_positions()
     max_pos  = cfg["risk"]["max_open_positions"]
