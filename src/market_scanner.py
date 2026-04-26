@@ -50,7 +50,7 @@ def parse_strike(ticker: str) -> dict:
     type: 'above' | 'between' | 'unknown'
     Examples:
       KXHIGHNY-26APR25-T65     -> above, value=65
-      KXHIGHNY-26APR25-B65     -> above (NO side = below), value=65
+      KXHIGHNY-26APR25-B65     -> above (NO side = below), value=65, _below=True
       KXHIGHNY-26APR25-R64T66  -> between, floor=64, cap=66
     """
     try:
@@ -157,8 +157,8 @@ def scan(kalshi_client, noaa_client, metar_client,
             log_event("WARN", "scanner", f"{series_ticker}: {e}")
             continue
         for m in mlist:
-            m["_variable"]   = variable
-            m["_city_code"]  = city_code
+            m["_variable"]      = variable
+            m["_city_code"]     = city_code
             m["_series_ticker"] = series_ticker
         collected.extend(mlist)
 
@@ -167,24 +167,24 @@ def scan(kalshi_client, noaa_client, metar_client,
     # Enrich with strike info, prices, target date
     enriched = 0
     for m in collected:
-        ticker = m.get("ticker", "")
-        yb = cents(m, "yes_bid")
-        ya = cents(m, "yes_ask")
+        ticker   = m.get("ticker", "")
+        yb       = cents(m, "yes_bid")
+        ya       = cents(m, "yes_ask")
         tgt_date = target_date_from_ticker(ticker)
-        si = parse_strike(ticker)
+        si       = parse_strike(ticker)
 
         upsert_market(
-            ticker         = ticker,
-            series_ticker  = m["_series_ticker"],
-            variable       = m["_variable"],
-            city           = m["_city_code"],
-            strike_type    = si["type"],
-            floor_strike   = si.get("floor"),
-            cap_strike     = si.get("cap"),
-            value_strike   = si.get("value"),
-            tgt_date       = tgt_date,
-            yes_bid        = yb,
-            yes_ask        = ya,
+            ticker        = ticker,
+            series_ticker = m["_series_ticker"],
+            variable      = m["_variable"],
+            city          = m["_city_code"],
+            strike_type   = si["type"],
+            floor_strike  = si.get("floor"),
+            cap_strike    = si.get("cap"),
+            value_strike  = si.get("value"),
+            tgt_date      = tgt_date,
+            yes_bid       = yb,
+            yes_ask       = ya,
         )
         enriched += 1
 
@@ -193,15 +193,15 @@ def scan(kalshi_client, noaa_client, metar_client,
     # Score candidates
     candidates = []
     for m in collected:
-        ticker     = m.get("ticker", "")
-        variable   = m["_variable"]
-        city_code  = m["_city_code"]
-        city_cfg   = cities_cfg.get(city_code)
+        ticker    = m.get("ticker", "")
+        variable  = m["_variable"]
+        city_code = m["_city_code"]
+        city_cfg  = cities_cfg.get(city_code)
         if not city_cfg:
             continue
 
-        yes_bid = cents(m, "yes_bid")
-        yes_ask = cents(m, "yes_ask")
+        yes_bid  = cents(m, "yes_bid")
+        yes_ask  = cents(m, "yes_ask")
         tgt_date = target_date_from_ticker(ticker)
         strike_info = parse_strike(ticker)
 
@@ -213,14 +213,25 @@ def scan(kalshi_client, noaa_client, metar_client,
         if sp is not None and sp > max_spread:
             continue
 
-        # Get forecast
+        # Determine horizon first so we can pass target_date to forecast
+        horizon = "next_day"
+        if tgt_date:
+            delta = (dt.date.fromisoformat(tgt_date) - dt.datetime.utcnow().date()).days
+            if delta <= 0:
+                horizon = "same_day"
+            elif delta == 1:
+                horizon = "next_day"
+            else:
+                horizon = "weekly"
+
+        # Get forecast — pass target_date so NOAA returns the right day's high/low
         try:
             if variable == "HIGHTEMP":
-                forecast = noaa_client.high_f(city_cfg["lat"], city_cfg["lon"])
+                forecast = noaa_client.high_f(city_cfg["lat"], city_cfg["lon"], target_date=tgt_date)
             elif variable == "LOWTEMP":
-                forecast = noaa_client.low_f(city_cfg["lat"], city_cfg["lon"])
+                forecast = noaa_client.low_f(city_cfg["lat"], city_cfg["lon"], target_date=tgt_date)
             else:
-                forecast = noaa_client.high_f(city_cfg["lat"], city_cfg["lon"])
+                forecast = noaa_client.high_f(city_cfg["lat"], city_cfg["lon"], target_date=tgt_date)
             if forecast is None:
                 continue
         except Exception:
@@ -246,24 +257,13 @@ def scan(kalshi_client, noaa_client, metar_client,
             if strike_val is None:
                 continue
 
-            # Determine horizon
-            horizon = "next_day"
-            if tgt_date:
-                delta = (dt.date.fromisoformat(tgt_date) - dt.datetime.utcnow().date()).days
-                if delta <= 0:
-                    horizon = "same_day"
-                elif delta == 1:
-                    horizon = "next_day"
-                else:
-                    horizon = "weekly"
-
-            sigma = sigma_for(variable, horizon)
-            st    = strike_info["type"]
-            floor = strike_info.get("floor")
-            cap   = strike_info.get("cap")
-            val   = strike_info.get("value")
-            fs    = floor if floor is not None else val
-            cs    = cap
+            sigma   = sigma_for(variable, horizon, target_date=tgt_date)
+            st      = strike_info["type"]
+            floor   = strike_info.get("floor")
+            cap     = strike_info.get("cap")
+            val     = strike_info.get("value")
+            fs      = floor if floor is not None else val
+            cs      = cap
 
             model_p = yes_prob(forecast, sigma, st, fs, cs)
             if model_p is None:
