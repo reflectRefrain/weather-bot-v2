@@ -16,7 +16,10 @@ VAR_PREFIX = {
     "WINDSPEED": ["KXHIGHWIND", "KXWIND"],
 }
 
-MONTHS = {m: i + 1 for i, m in enumerate(["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"])}
+MONTHS = {m: i + 1 for i, m in enumerate(["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"])}
+
+UTC_OFFSET_CDT = -5  # CDT = UTC-5
+
 
 def log_event(level, module, message):
     with conn() as c:
@@ -24,6 +27,12 @@ def log_event(level, module, message):
             "INSERT INTO events(ts,level,module,message) VALUES(?,?,?,?)",
             (dt.datetime.utcnow().isoformat(), level, module, message),
         )
+
+
+def local_hour() -> int:
+    """Current local hour in CDT (UTC-5)."""
+    return (dt.datetime.utcnow().hour + UTC_OFFSET_CDT) % 24
+
 
 def build_series_list(cfg):
     cities = [c["code"] for c in cfg["cities"]]
@@ -44,6 +53,7 @@ def build_series_list(cfg):
         out.append(row)
     return out
 
+
 def parse_strike(ticker: str) -> dict:
     """
     Returns dict with keys: type, value, floor, cap
@@ -56,25 +66,22 @@ def parse_strike(ticker: str) -> dict:
     try:
         parts = ticker.split("-")
         sp = parts[-1]
-        # Between: starts with digit, contains T separator, e.g. 64T66 or R64T66
         m = re.match(r'^R?(\d+\.?\d*)T(\d+\.?\d*)$', sp)
         if m:
             return {"type": "between", "floor": float(m.group(1)), "cap": float(m.group(2)), "value": None}
-        # Above threshold: T65 or just 65 (Kalshi uses T for >=)
         m = re.match(r'^T(\d+\.?\d*)$', sp)
         if m:
             return {"type": "above", "value": float(m.group(1)), "floor": None, "cap": None}
-        # Below threshold: B65
         m = re.match(r'^B(\d+\.?\d*)$', sp)
         if m:
             return {"type": "above", "value": float(m.group(1)), "floor": None, "cap": None, "_below": True}
-        # Bare number
         m = re.match(r'^(\d+\.?\d*)$', sp)
         if m:
             return {"type": "above", "value": float(m.group(1)), "floor": None, "cap": None}
     except Exception:
         pass
     return {"type": "unknown"}
+
 
 def target_date_from_ticker(ticker: str):
     """Extract YYYY-MM-DD from e.g. KXHIGHNY-26APR25-T65"""
@@ -91,6 +98,7 @@ def target_date_from_ticker(ticker: str):
     except Exception:
         return None
 
+
 def cents(m: dict, key: str):
     v = m.get(key)
     if v is not None:
@@ -100,10 +108,12 @@ def cents(m: dict, key: str):
         return int(round(float(dv) * 100))
     return None
 
+
 def spread_c(yes_bid, yes_ask):
     if yes_bid is None or yes_ask is None:
         return None
     return yes_ask - yes_bid
+
 
 def upsert_market(ticker, series_ticker, variable, city, strike_type,
                   floor_strike, cap_strike, value_strike, tgt_date,
@@ -127,6 +137,7 @@ def upsert_market(ticker, series_ticker, variable, city, strike_type,
             dt.datetime.utcnow().isoformat()
         ))
 
+
 def scan(kalshi_client, noaa_client, metar_client,
          config_path="/app/config.yaml") -> list:
     """
@@ -136,15 +147,18 @@ def scan(kalshi_client, noaa_client, metar_client,
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 
-    risk       = cfg["risk"]
-    cities_cfg = {c["code"]: c for c in cfg["cities"]}
-    min_edge   = risk["min_edge_cents"]
-    max_spread = risk["max_spread_cents"]
-    min_price  = risk["min_entry_cents"]
-    max_price  = risk["max_entry_cents"]
+    risk            = cfg["risk"]
+    cities_cfg      = {c["code"]: c for c in cfg["cities"]}
+    min_edge        = risk["min_edge_cents"]
+    max_spread      = risk["max_spread_cents"]
+    min_price       = risk["min_entry_cents"]
+    max_price       = risk["max_entry_cents"]
+    start_hour      = risk.get("trade_start_hour_local", 6)  # default 6 AM
+    now_local_hour  = local_hour()
+    trading_open    = now_local_hour >= start_hour
 
     series_list = build_series_list(cfg)
-    log_event("INFO", "scanner", f"Scanning {len(series_list)} series")
+    log_event("INFO", "scanner", f"Scanning {len(series_list)} series | local_hour={now_local_hour} | trading_open={trading_open}")
 
     collected = []
     for (variable, city_code, series_ticker) in series_list:
@@ -164,7 +178,6 @@ def scan(kalshi_client, noaa_client, metar_client,
 
     log_event("INFO", "scanner", f"Collected {len(collected)} raw markets")
 
-    # Enrich with strike info, prices, target date
     enriched = 0
     for m in collected:
         ticker   = m.get("ticker", "")
@@ -172,7 +185,6 @@ def scan(kalshi_client, noaa_client, metar_client,
         ya       = cents(m, "yes_ask")
         tgt_date = target_date_from_ticker(ticker)
         si       = parse_strike(ticker)
-
         upsert_market(
             ticker        = ticker,
             series_ticker = m["_series_ticker"],
@@ -190,7 +202,6 @@ def scan(kalshi_client, noaa_client, metar_client,
 
     log_event("INFO", "scanner", f"Enriched {enriched} markets")
 
-    # Score candidates
     candidates = []
     for m in collected:
         ticker    = m.get("ticker", "")
@@ -200,9 +211,9 @@ def scan(kalshi_client, noaa_client, metar_client,
         if not city_cfg:
             continue
 
-        yes_bid  = cents(m, "yes_bid")
-        yes_ask  = cents(m, "yes_ask")
-        tgt_date = target_date_from_ticker(ticker)
+        yes_bid     = cents(m, "yes_bid")
+        yes_ask     = cents(m, "yes_ask")
+        tgt_date    = target_date_from_ticker(ticker)
         strike_info = parse_strike(ticker)
 
         if strike_info["type"] == "unknown":
@@ -213,7 +224,7 @@ def scan(kalshi_client, noaa_client, metar_client,
         if sp is not None and sp > max_spread:
             continue
 
-        # Determine horizon first so we can pass target_date to forecast
+        # Determine horizon
         horizon = "next_day"
         if tgt_date:
             delta = (dt.date.fromisoformat(tgt_date) - dt.datetime.utcnow().date()).days
@@ -224,7 +235,11 @@ def scan(kalshi_client, noaa_client, metar_client,
             else:
                 horizon = "weekly"
 
-        # Get forecast — pass target_date so NOAA returns the right day's high/low
+        # Time gate: skip same_day trades before trade_start_hour_local
+        if horizon == "same_day" and not trading_open:
+            continue
+
+        # Get forecast with target_date so NOAA returns the right day
         try:
             if variable == "HIGHTEMP":
                 forecast = noaa_client.high_f(city_cfg["lat"], city_cfg["lon"], target_date=tgt_date)
@@ -237,18 +252,14 @@ def scan(kalshi_client, noaa_client, metar_client,
         except Exception:
             continue
 
-        # Get live obs
+        # Live obs
         try:
             obs_f = metar_client.temp_f(city_cfg["metar"])
         except Exception:
             obs_f = None
 
-        # Score both YES and NO sides
         for side in ("yes", "no"):
-            if side == "yes":
-                price_c = yes_ask
-            else:
-                price_c = 100 - yes_bid
+            price_c = yes_ask if side == "yes" else 100 - yes_bid
 
             if not (min_price <= price_c <= max_price):
                 continue
@@ -259,17 +270,13 @@ def scan(kalshi_client, noaa_client, metar_client,
 
             sigma   = sigma_for(variable, horizon, target_date=tgt_date)
             st      = strike_info["type"]
-            floor   = strike_info.get("floor")
-            cap     = strike_info.get("cap")
-            val     = strike_info.get("value")
-            fs      = floor if floor is not None else val
-            cs      = cap
+            fs      = strike_info.get("floor") if strike_info.get("floor") is not None else strike_info.get("value")
+            cs      = strike_info.get("cap")
 
             model_p = yes_prob(forecast, sigma, st, fs, cs)
             if model_p is None:
                 continue
 
-            # For B-type (below) tickers, YES means below => invert
             if strike_info.get("_below"):
                 model_p = 1.0 - model_p
 
@@ -277,10 +284,7 @@ def scan(kalshi_client, noaa_client, metar_client,
             if market_p is None:
                 continue
 
-            if side == "yes":
-                ec = (model_p - market_p) * 100
-            else:
-                ec = ((1 - model_p) - (1 - market_p)) * 100
+            ec = (model_p - market_p) * 100 if side == "yes" else ((1 - model_p) - (1 - market_p)) * 100
 
             if ec < min_edge:
                 continue
