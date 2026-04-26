@@ -115,11 +115,11 @@ async def trader_loop():
                     result = place_order(k, best, cfg)
                     if result["success"]:
                         msg = (
-                            f"{'📄' if result['mode']=='paper' else '💰'} "
+                            f"{'\ud83d\udcc4' if result['mode']=='paper' else '\ud83d\udcb0'} "
                             f"{'PAPER' if result['mode']=='paper' else 'LIVE'} TRADE\n"
                             f"{best['ticker']}\n"
                             f"{best['side'].upper()} x{result['qty']} @ {best['price_cents']}¢\n"
-                            f"Edge: {best['edge_cents']}¢  Kelly: ${best['kelly_usd']}\n"
+                            f"Edge: {best['edge_cents']}¢  Size: ${result['cost_usd']:.2f}\n"
                             f"Forecast: {best['forecast_f']}°F  Obs: {best['obs_f']}°F"
                         )
                         log(msg.replace("\n", " | "))
