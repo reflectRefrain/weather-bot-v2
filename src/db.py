@@ -15,8 +15,11 @@ def conn():
     return c
 
 def _migrate(c):
-    """Add new columns to existing tables without dropping data."""
-    cols = {r[0] for r in c.execute("PRAGMA table_info(positions)").fetchall()}
+    """Add new columns to existing tables without dropping data.
+    NOTE: PRAGMA table_info rows have row_factory=Row so use r['name'],
+    not r[0] (which is the integer cid).
+    """
+    cols = {r['name'] for r in c.execute("PRAGMA table_info(positions)").fetchall()}
     if "exit_price_cents" not in cols:
         c.execute("ALTER TABLE positions ADD COLUMN exit_price_cents INTEGER")
     if "exit_reason" not in cols:
