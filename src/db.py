@@ -14,16 +14,18 @@ def conn():
     c.execute("PRAGMA foreign_keys=ON")
     return c
 
-def _migrate(c):
+def _migrate():
     """Add new columns to existing tables without dropping data.
-    NOTE: PRAGMA table_info rows have row_factory=Row so use r['name'],
-    not r[0] (which is the integer cid).
+    Called AFTER executescript() so it opens its own fresh connection.
+    executescript() issues an implicit COMMIT and can leave the
+    original connection in an unusable state for further DDL.
     """
-    cols = {r['name'] for r in c.execute("PRAGMA table_info(positions)").fetchall()}
-    if "exit_price_cents" not in cols:
-        c.execute("ALTER TABLE positions ADD COLUMN exit_price_cents INTEGER")
-    if "exit_reason" not in cols:
-        c.execute("ALTER TABLE positions ADD COLUMN exit_reason TEXT")
+    with conn() as c:
+        cols = {r['name'] for r in c.execute("PRAGMA table_info(positions)").fetchall()}
+        if "exit_price_cents" not in cols:
+            c.execute("ALTER TABLE positions ADD COLUMN exit_price_cents INTEGER")
+        if "exit_reason" not in cols:
+            c.execute("ALTER TABLE positions ADD COLUMN exit_reason TEXT")
 
 def init_db():
     with conn() as c:
@@ -103,8 +105,9 @@ def init_db():
         INSERT OR IGNORE INTO state(key,value) VALUES('daily_loss_usd','0');
         INSERT OR IGNORE INTO state(key,value) VALUES('day_start_balance','0');
         """)
-        # Migrate existing DB to add new columns if upgrading
-        _migrate(c)
+    # executescript() issues implicit COMMIT and closes the tx.
+    # Run migration on a clean separate connection.
+    _migrate()
 
 if __name__ == "__main__":
     init_db()
