@@ -6,6 +6,7 @@ Manages PAPER and LIVE positions.
 - Checks latest market prices from Kalshi.
 - Closes positions when TP or SL is hit.
 - Writes realized PnL.
+- Writes exit_price_cents and exit_reason back to positions table.
 - Logs events.
 - Supports dry-run mode.
 
@@ -141,7 +142,10 @@ def close_paper_position(row, exit_cents, reason, dry_run=True):
             INSERT INTO pnl(ticker, side, qty, entry_cents, exit_cents, realized_usd, closed_at, reason)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (ticker, side, qty, entry, int(exit_cents), realized, nowiso(), reason))
-        c.execute("UPDATE positions SET status='CLOSED' WHERE ticker=? AND status='OPEN'", (ticker,))
+        c.execute(
+            "UPDATE positions SET status='CLOSED', exit_price_cents=?, exit_reason=? WHERE ticker=? AND status='OPEN'",
+            (int(exit_cents), reason, ticker),
+        )
 
     if reason == "SL":
         cd = add_cooldown(ticker, side, reason="SL")
@@ -190,7 +194,10 @@ def close_live_position(kalshi_client, row, exit_cents, reason, dry_run=True):
             INSERT INTO pnl(ticker, side, qty, entry_cents, exit_cents, realized_usd, closed_at, reason)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (ticker, side, qty, entry, int(exit_cents), realized, nowiso(), reason))
-        c.execute("UPDATE positions SET status='CLOSED' WHERE ticker=? AND status='OPEN'", (ticker,))
+        c.execute(
+            "UPDATE positions SET status='CLOSED', exit_price_cents=?, exit_reason=? WHERE ticker=? AND status='OPEN'",
+            (int(exit_cents), reason, ticker),
+        )
 
     if reason == "SL":
         cd = add_cooldown(ticker, side, reason="SL")
