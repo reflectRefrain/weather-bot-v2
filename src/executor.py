@@ -69,13 +69,26 @@ def set_kill_switch(on: bool):
     )
 
 
+def total_balance_usd(kalshi_client) -> float:
+    """Return free cash + open position portfolio value in USD.
+    Kalshi 'balance' field is free cash only (cents).
+    'portfolio_value' is the mark-to-market value of open positions (cents).
+    Using both gives the correct total equity figure for loss tracking.
+    """
+    resp = kalshi_client.balance()
+    free_cash = resp.get("balance", 0) / 100.0
+    portfolio = resp.get("portfolio_value", 0) / 100.0
+    return free_cash + portfolio
+
+
 def daily_loss_check(kalshi_client, cfg) -> bool:
     try:
-        bal_resp = kalshi_client.balance()
-        balance = bal_resp.get("balance", 0) / 100.0
+        balance = total_balance_usd(kalshi_client)
         day_start = float(get_state("day_start_balance") or balance)
         loss = day_start - balance
         limit = cfg["bankroll_usd"] * cfg["risk"]["daily_loss_limit_pct"]
+        log_event("INFO", "executor",
+                  f"Daily loss check: start=${day_start:.2f} now=${balance:.2f} loss=${loss:.2f} limit=${limit:.2f}")
         if loss >= limit:
             log_event("WARN", "executor",
                       f"Daily loss limit hit: lost ${loss:.2f} vs limit ${limit:.2f}")
