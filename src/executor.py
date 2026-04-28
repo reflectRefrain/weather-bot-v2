@@ -7,7 +7,7 @@ RULES ENFORCED HERE:
   4. Daily loss limit auto-kill
   5. Min balance guard
   6. Kill switch check before every order
-  7. Cancel stale resting orders automatically
+  7. Cancel stale resting orders automatically (mark expired on 400/404, stop retrying)
   8. Block entry if resting order already exists for same ticker
   9. Block same-day HIGHTEMP YES if obs shows socked-in conditions
 """
@@ -242,6 +242,10 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
 
 
 def cancel_stale_orders(kalshi_client, cfg: dict):
+    """Cancel resting orders older than cancel_after_seconds.
+    On 400/404 (order already gone on Kalshi side), mark as 'expired' and stop retrying.
+    On 5xx or network errors, leave as 'resting' to retry next cycle.
+    """
     max_age = cfg["risk"].get("cancel_after_seconds", 120)
     with conn() as c:
         stale = c.execute(
@@ -263,4 +267,17 @@ def cancel_stale_orders(kalshi_client, cfg: dict):
             log_event("INFO", "executor",
                       f"Cancelled stale order {row['order_id']} {row['ticker']}")
         except Exception as e:
-            log_event("ERROR", "executor", f"cancel_order failed {row['order_id']}: {e}")
+            err = str(e)
+            # 400/404 = order no longer exists on Kalshi — stop retrying
+            if "400" in err or "404" in err or "not found" in err.lower() or "does not exist" in err.lower():
+                with conn() as c:
+                    c.execute(
+                        "UPDATE orders SET status='expired' WHERE order_id=?",
+                        (row["order_id"],),
+                    )
+                log_event("INFO", "executor",
+                          f"Order {row['order_id']} already gone on Kalshi — marked expired")
+            else:
+                # 5xx or network error — log but leave as resting to retry
+                log_event("ERROR", "executor",
+                          f"cancel_order failed {row['order_id']}: {err[:120]}")
