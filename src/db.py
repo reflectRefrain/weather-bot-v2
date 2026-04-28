@@ -14,6 +14,14 @@ def conn():
     c.execute("PRAGMA foreign_keys=ON")
     return c
 
+def _migrate(c):
+    """Add new columns to existing tables without dropping data."""
+    cols = {r[0] for r in c.execute("PRAGMA table_info(positions)").fetchall()}
+    if "exit_price_cents" not in cols:
+        c.execute("ALTER TABLE positions ADD COLUMN exit_price_cents INTEGER")
+    if "exit_reason" not in cols:
+        c.execute("ALTER TABLE positions ADD COLUMN exit_reason TEXT")
+
 def init_db():
     with conn() as c:
         c.executescript("""
@@ -38,14 +46,16 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS positions (
-            ticker          TEXT PRIMARY KEY,
-            side            TEXT,
-            qty             INTEGER,
-            avg_price_cents INTEGER,
-            opened_at       TEXT,
-            tp_price        INTEGER,
-            sl_price        INTEGER,
-            status          TEXT DEFAULT 'OPEN'
+            ticker              TEXT PRIMARY KEY,
+            side                TEXT,
+            qty                 INTEGER,
+            avg_price_cents     INTEGER,
+            opened_at           TEXT,
+            tp_price            INTEGER,
+            sl_price            INTEGER,
+            status              TEXT DEFAULT 'OPEN',
+            exit_price_cents    INTEGER,
+            exit_reason         TEXT
         );
 
         CREATE TABLE IF NOT EXISTS orders (
@@ -90,6 +100,8 @@ def init_db():
         INSERT OR IGNORE INTO state(key,value) VALUES('daily_loss_usd','0');
         INSERT OR IGNORE INTO state(key,value) VALUES('day_start_balance','0');
         """)
+        # Migrate existing DB to add new columns if upgrading
+        _migrate(c)
 
 if __name__ == "__main__":
     init_db()
