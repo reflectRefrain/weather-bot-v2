@@ -1,5 +1,6 @@
 """Scanner v2: pulls Kalshi weather markets, persists strike_type, prices, target_date."""
 import datetime as dt, re, yaml
+from zoneinfo import ZoneInfo
 from db import conn
 from kalshi_client import KalshiClient
 
@@ -12,6 +13,7 @@ CITY_COORDS = {
     "AUS":  (30.1975, -97.6664),
     "PHIL": (39.8729, -75.2437),
     "BOS":  (42.3606, -71.0106),
+    "HOU":  (29.9844, -95.3414),
 }
 
 CITY_METAR = {
@@ -23,6 +25,19 @@ CITY_METAR = {
     "AUS":  "KAUS",
     "PHIL": "KPHL",
     "BOS":  "KBOS",
+    "HOU":  "KHOU",
+}
+
+CITY_TZ = {
+    "NYC":  "America/New_York",
+    "BOS":  "America/New_York",
+    "PHIL": "America/New_York",
+    "MIA":  "America/New_York",
+    "CHI":  "America/Chicago",
+    "HOU":  "America/Chicago",
+    "AUS":  "America/Chicago",
+    "DEN":  "America/Denver",
+    "LAX":  "America/Los_Angeles",
 }
 
 CITY_CODES = {
@@ -34,6 +49,7 @@ CITY_CODES = {
     "AUS":  ["AUS"],
     "PHIL": ["PHIL"],
     "BOS":  ["BOS"],
+    "HOU":  ["HOU"],
 }
 
 VAR_PREFIX = {
@@ -48,9 +64,15 @@ MONTHS = {m: i + 1 for i, m in enumerate(
     ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
 )}
 
-MIN_EDGE_CENTS = 10
-MIN_ENTRY_CENTS = 5
+MIN_EDGE_CENTS  = 8    # minimum model edge over market mid
+MIN_ENTRY_CENTS = 20   # never buy contracts cheaper than 20c (low conviction)
 MAX_ENTRY_CENTS = 90
+
+# Entry time windows (local hour, inclusive)
+SAME_DAY_ENTRY_START = 8   # 8 AM local — after markets reprice with morning obs
+SAME_DAY_ENTRY_END   = 15  # 3 PM local — before late-day illiquidity
+NEXT_DAY_ENTRY_START = 6   # 6 AM local — fresh NOAA forecast
+NEXT_DAY_ENTRY_END   = 10  # 10 AM local — morning window only
 
 
 def log_event(level, module, message):
@@ -115,6 +137,25 @@ def horizon_of(target_date_iso):
         return "unknown"
 
 
+def is_valid_entry_time(horizon: str, city: str) -> bool:
+    """Gate entries by local time of day.
+
+    same_day:  8 AM – 3 PM local (after morning reprice, before illiquidity)
+    next_day:  6 AM – 10 AM local (fresh NOAA, next-day market just opened)
+    weekly:    always allowed (long time horizon, time-of-day irrelevant)
+    """
+    try:
+        tz = ZoneInfo(CITY_TZ.get(city, "America/New_York"))
+        hour = dt.datetime.now(tz).hour
+        if horizon == "same_day":
+            return SAME_DAY_ENTRY_START <= hour <= SAME_DAY_ENTRY_END
+        if horizon == "next_day":
+            return NEXT_DAY_ENTRY_START <= hour <= NEXT_DAY_ENTRY_END
+        return True
+    except Exception:
+        return True  # default allow on tz error
+
+
 def _d2c(v):
     if v is None or v == "":
         return None
@@ -151,8 +192,16 @@ def fetch_single(k, ticker):
 
 
 def score_candidates(markets, noaa_client, metar_client, cfg):
-    """Score each market dict against NOAA forecast and return sorted candidates."""
-    from model import sigma_for, yes_prob, market_mid_prob
+    """Score each market dict against NOAA forecast + METAR obs.
+
+    Improvements over v1:
+      - time_adjusted_sigma: sigma shrinks during the day for same_day markets
+      - adjusted_forecast: obs anchors the forecast floor/ceil for same_day
+      - is_valid_entry_time: only enter same_day 8AM-3PM, next_day 6AM-10AM
+      - min_model_prob: don't trade unless model >= 70% confident
+    """
+    from model import sigma_for, time_adjusted_sigma, adjusted_forecast, yes_prob, market_mid_prob
+    min_model_prob = float(cfg.get("risk", {}).get("min_model_prob", 0.70))
     candidates = []
     for m in markets:
         var    = m.get("variable")
@@ -174,6 +223,10 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
         if not coords:
             continue
 
+        # ── Entry time gate ──────────────────────────────────────────────
+        if not is_valid_entry_time(hz, city):
+            continue
+
         try:
             periods = noaa_client.forecast(coords[0], coords[1])
             tdate   = m.get("target_date")
@@ -183,7 +236,6 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
                     forecast_f = p["temperature"]
                     break
             if forecast_f is None:
-                # fallback: first daytime period
                 for p in periods:
                     if p["isDaytime"]:
                         forecast_f = p["temperature"]
@@ -191,6 +243,7 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
         except Exception:
             continue
 
+        # ── Fetch METAR obs ──────────────────────────────────────────────
         obs_f = None
         try:
             station = CITY_METAR.get(city)
@@ -200,8 +253,14 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
         except Exception:
             pass
 
-        sigma = sigma_for(var, hz)
-        mp    = yes_prob(forecast_f, sigma, st, lo, hi)
+        # ── Anchor forecast with current obs (same_day only) ─────────────
+        effective_forecast = adjusted_forecast(forecast_f, obs_f, var, hz)
+
+        # ── Time-adjusted sigma ──────────────────────────────────────────
+        base_sigma = sigma_for(var, hz)
+        sigma      = time_adjusted_sigma(base_sigma, hz, city)
+
+        mp    = yes_prob(effective_forecast, sigma, st, lo, hi)
         if mp is None:
             continue
 
@@ -212,44 +271,53 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
         edge_yes = (mp - mid) * 100
         edge_no  = ((1 - mp) - (1 - mid)) * 100
 
+        # ── Min model probability gate ───────────────────────────────────
+        # Only trade when the model is genuinely confident (>=70% by default)
+        if mp < min_model_prob and (1 - mp) < min_model_prob:
+            continue
+
         if edge_yes >= MIN_EDGE_CENTS and MIN_ENTRY_CENTS <= ya <= MAX_ENTRY_CENTS:
             candidates.append({
-                "ticker":      ticker,
-                "side":        "yes",
-                "variable":    var,
-                "city":        city,
-                "horizon":     hz,
-                "strike_type": st,
-                "strike_low":  lo,
-                "strike_high": hi,
-                "yes_bid":     yb,
-                "yes_ask":     ya,
-                "model_prob":  mp,
-                "market_mid":  mid,
-                "edge_cents":  round(edge_yes, 2),
-                "forecast_f":  forecast_f,
-                "obs_f":       obs_f,
-                "price_cents": ya,
+                "ticker":            ticker,
+                "side":              "yes",
+                "variable":          var,
+                "city":              city,
+                "horizon":           hz,
+                "strike_type":       st,
+                "strike_low":        lo,
+                "strike_high":       hi,
+                "yes_bid":           yb,
+                "yes_ask":           ya,
+                "model_prob":        mp,
+                "market_mid":        mid,
+                "edge_cents":        round(edge_yes, 2),
+                "forecast_f":        forecast_f,
+                "effective_forecast": effective_forecast,
+                "obs_f":             obs_f,
+                "sigma_used":        round(sigma, 2),
+                "price_cents":       ya,
             })
         elif edge_no >= MIN_EDGE_CENTS and MIN_ENTRY_CENTS <= (100 - yb) <= MAX_ENTRY_CENTS:
             no_ask = 100 - yb
             candidates.append({
-                "ticker":      ticker,
-                "side":        "no",
-                "variable":    var,
-                "city":        city,
-                "horizon":     hz,
-                "strike_type": st,
-                "strike_low":  lo,
-                "strike_high": hi,
-                "yes_bid":     yb,
-                "yes_ask":     ya,
-                "model_prob":  1 - mp,
-                "market_mid":  1 - mid,
-                "edge_cents":  round(edge_no, 2),
-                "forecast_f":  forecast_f,
-                "obs_f":       obs_f,
-                "price_cents": no_ask,
+                "ticker":            ticker,
+                "side":              "no",
+                "variable":          var,
+                "city":              city,
+                "horizon":           hz,
+                "strike_type":       st,
+                "strike_low":        lo,
+                "strike_high":       hi,
+                "yes_bid":           yb,
+                "yes_ask":           ya,
+                "model_prob":        1 - mp,
+                "market_mid":        1 - mid,
+                "edge_cents":        round(edge_no, 2),
+                "forecast_f":        forecast_f,
+                "effective_forecast": effective_forecast,
+                "obs_f":             obs_f,
+                "sigma_used":        round(sigma, 2),
+                "price_cents":       no_ask,
             })
 
     candidates.sort(key=lambda x: x["edge_cents"], reverse=True)
@@ -329,7 +397,7 @@ def scan_once(config_path="/app/config.yaml"):
 
 
 def scan(kalshi_client=None, noaa_client=None, metar_client=None, config_path="/app/config.yaml"):
-    """Main entry point called by main.py. Fetches markets, scores, returns candidates."""
+    """Main entry point called by main.py."""
     from noaa_client import NoaaClient
     from metar_client import MetarClient
     import yaml
