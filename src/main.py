@@ -1,12 +1,13 @@
 """
-Weather Bot v2 — Main trader loop (fully async).
+Weather Bot v3 — Main trader loop.
+Strategy: lockin_v3 (observation-based, near-certainty only)
 """
 import asyncio, datetime as dt, os, yaml
 from db import init_db, conn
 from kalshi_client import KalshiClient
-from noaa_client import NoaaClient
 from metar_client import MetarClient
-from market_scanner import scan
+from metar_tracker import refresh_all_cities
+from scanner_v3 import scan_v3
 from executor import (place_order, cancel_stale_orders, daily_loss_check,
                       kill_switch_on, set_state, get_state, log_event)
 from reconcile import sync
@@ -15,18 +16,16 @@ from telegram_bot import notify, run_bot_async
 
 CONFIG_PATH = os.getenv("CONFIG_PATH", "/app/config.yaml")
 
+
 def load_config():
     with open(CONFIG_PATH) as f:
         return yaml.safe_load(f)
+
 
 def log(msg):
     ts = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"[{ts}] {msg}", flush=True)
 
-def is_trading_hours() -> bool:
-    from zoneinfo import ZoneInfo
-    hour = dt.datetime.now(ZoneInfo("America/New_York")).hour
-    return 6 <= hour < 21
 
 def init_day_balance(kalshi_client):
     today = dt.date.today().isoformat()
@@ -40,44 +39,49 @@ def init_day_balance(kalshi_client):
     except Exception as e:
         log(f"Could not record day start balance: {e}")
 
+
 async def trader_loop():
     init_db()
-    cfg     = load_config()
-    k       = KalshiClient()
-    n       = NoaaClient()
-    m       = MetarClient()
-    cycle   = 0
+    cfg   = load_config()
+    k     = KalshiClient()
+    m     = MetarClient()
+    cycle = 0
 
     set_state("mode", cfg.get("mode", "paper"))
-    log(f"Starting in {cfg.get('mode','paper').upper()} mode")
-    await notify("Weather Bot v2 started\nMode: " + cfg.get('mode','paper').upper())
+    strategy = cfg.get("strategy", "lockin_v3")
+    log(f"Starting v3 | mode={cfg.get('mode','paper').upper()} | strategy={strategy}")
+    await notify(
+        f"Weather Bot v3 started\n"
+        f"Mode: {cfg.get('mode','paper').upper()}\n"
+        f"Strategy: {strategy}"
+    )
 
     sleep_sec    = cfg.get("loop_sleep_seconds", 60)
-    scan_every_n = cfg.get("scan_every_n_cycles", 5)
+    scan_every_n = cfg.get("scan_every_n_cycles", 3)  # scan more often for lock-in
 
     while True:
         try:
             cfg   = load_config()
             cycle += 1
-            log(f"Cycle {cycle} - kill={'ON' if kill_switch_on() else 'OFF'} mode={get_state('mode')}")
+            log(f"Cycle {cycle} | kill={'ON' if kill_switch_on() else 'OFF'} | mode={get_state('mode')}")
 
+            # ── Safety checks ───────────────────────────────────────────────────
             if kill_switch_on():
-                log("Kill switch ON - skipping cycle")
+                log("Kill switch ON — skipping cycle")
                 await asyncio.sleep(sleep_sec)
                 continue
 
             init_day_balance(k)
 
             if daily_loss_check(k, cfg):
-                log("Daily loss limit hit - kill switch activated")
-                await notify("Daily loss limit hit - bot paused automatically")
+                log("Daily loss limit hit — kill switch activated")
+                await notify("⚠️ Daily loss limit hit — bot paused")
                 await asyncio.sleep(sleep_sec)
                 continue
 
+            # ── Reconcile & position management ──────────────────────────────
             mode = get_state("mode") or cfg.get("mode", "paper")
-            if mode == "paper":
-                log("Paper mode - skipping live reconcile")
-            else:
+            if mode != "paper":
                 result = sync(k)
                 if result.get("error"):
                     log(f"Reconcile error: {result['error']}")
@@ -88,47 +92,47 @@ async def trader_loop():
             for pm in pm_results:
                 if pm.get("action") in ("TP", "SL"):
                     log(
-                        f"Position manager {pm['action']}: {pm['ticker']} "
-                        f"{pm['side']} qty={pm['qty']} "
-                        f"entry={pm['entry_cents']}c exit={pm['exit_cents']}c "
-                        f"pnl=${pm['realized_usd']:+.2f}"
+                        f"PM {pm['action']}: {pm['ticker']} {pm['side']} "
+                        f"qty={pm['qty']} entry={pm['entry_cents']}c "
+                        f"exit={pm['exit_cents']}c pnl=${pm['realized_usd']:+.2f}"
                     )
 
             cancel_stale_orders(k, cfg)
 
-            if not is_trading_hours():
-                log("Outside trading hours (6AM-9PM ET) - managed positions only; no new entries")
-                await asyncio.sleep(sleep_sec)
-                continue
+            # ── Always refresh METAR obs (even off-cycle) ─────────────────────
+            try:
+                temps = refresh_all_cities(m)
+                log("METAR refresh: " + " ".join(
+                    f"{c}={v:.1f}F" for c, v in temps.items() if v is not None
+                ))
+            except Exception as e:
+                log(f"METAR refresh error: {e}")
 
+            # ── Scan & trade every N cycles ───────────────────────────────
             if cycle % scan_every_n == 0:
-                log("Scanning markets...")
-                candidates = scan(k, n, m, config_path=CONFIG_PATH)
+                log("Scanning lock-in candidates...")
+                candidates = scan_v3(metar_client=m, config_path=CONFIG_PATH)
 
-                if candidates and candidates[0].get("error"):
-                    log(f"Scan error: {candidates[0]['error']}")
-                elif not candidates:
-                    log("No candidates found")
+                if not candidates:
+                    log("No lock-in candidates — nothing certain enough to trade")
                 else:
-                    log(f"Found {len(candidates)} - best edge: {candidates[0]['edge_cents']}c")
-                    best   = candidates[0]
-                    result = place_order(k, best, cfg)
-                    if result["success"]:
-                        trade_type = "PAPER" if result["mode"] == "paper" else "LIVE"
-                        msg = (
-                            trade_type + " TRADE\n"
-                            + best["ticker"] + "\n"
-                            + best["side"].upper() + " x" + str(result["qty"])
-                            + " @ " + str(best["price_cents"]) + "c\n"
-                            + "Edge: " + str(best["edge_cents"]) + "c"
-                            + "  Size: $" + str(round(result["cost_usd"], 2)) + "\n"
-                            + "Forecast: " + str(best["forecast_f"]) + "F"
-                            + "  Obs: " + str(best["obs_f"]) + "F"
-                        )
-                        log(msg.replace("\n", " | "))
-                        await notify(msg)
-                    else:
-                        log(f"Order skipped: {result['reason']}")
+                    log(f"{len(candidates)} candidate(s) — best edge: {candidates[0]['edge_cents']}c")
+                    for best in candidates:
+                        result = place_order(k, best, cfg)
+                        if result["success"]:
+                            trade_type = "PAPER" if result.get("mode") == "paper" else "LIVE"
+                            msg = (
+                                f"🟢 {trade_type} LOCK-IN TRADE\n"
+                                f"{best['ticker']}\n"
+                                f"{best['side'].upper()} x{result['qty']} @ {best['price_cents']}c\n"
+                                f"Edge: {best['edge_cents']}c  Size: ${round(result['cost_usd'],2)}\n"
+                                f"Running max: {best.get('running_max','?')}F  "
+                                f"Hrs to lock: {best.get('hours_to_lock','?')}"
+                            )
+                            log(msg.replace("\n", " | "))
+                            await notify(msg)
+                        else:
+                            log(f"Order skipped: {result['reason']}")
 
         except Exception as e:
             log(f"Cycle error: {e}")
@@ -136,10 +140,12 @@ async def trader_loop():
 
         await asyncio.sleep(sleep_sec)
 
+
 async def main():
     tg_task     = asyncio.create_task(run_bot_async())
     trader_task = asyncio.create_task(trader_loop())
     await asyncio.gather(tg_task, trader_task)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

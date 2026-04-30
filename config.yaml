@@ -1,40 +1,45 @@
 # ─────────────────────────────────────────
-#  Weather Bot v2 — Master Config
-#  Edit this file to change any setting.
-#  Bot reloads config every cycle — no restart needed.
+#  Weather Bot v3 — Master Config
+#  Strategy: lockin_v3 (observation-based)
 # ─────────────────────────────────────────
 
 # Trading mode: paper = no real orders, live = real orders
 mode: live
 
-# Bankroll (updated to current account value Apr 28 2026)
-bankroll_usd: 25.04
+# Active strategy
+strategy: lockin_v3
+
+# Bankroll (updated Apr 30 2026)
+bankroll_usd: 19.95
 
 # Risk controls
 risk:
-  daily_loss_limit_pct: 0.08       # Kill bot if down 8% in one day (~$2.00)
-  max_open_positions: 3            # Max concurrent open positions
-  min_edge_cents: 8                # Min model edge over market mid (cents)
-  max_spread_cents: 15             # Skip markets with spread wider than this
-  min_entry_cents: 20              # Skip cheap low-conviction contracts
-  max_entry_cents: 90              # Don't buy contracts more expensive than 90c
-  min_model_prob: 0.70             # Only trade when model is >=70% confident
-  kelly_fraction: 0.15             # Conservative Kelly fraction on small bankroll
-  min_trade_usd: 0.50              # Minimum order size in dollars
-  max_trade_usd: 1.50              # Maximum order size per trade
-  max_per_ticker_usd: 1.50         # Hard cap per ticker regardless of Kelly
-  min_balance_usd: 10.00           # Pause if balance drops below this
-  cancel_after_seconds: 120        # Cancel unfilled resting orders after 2 min
-  trade_start_hour_local: 6        # (legacy) kept for compatibility
+  # Lock-in strategy gates
+  min_lockin_prob: 0.98        # Only trade when model is >=98% certain
+  min_obs_count: 2             # Need at least 2 METAR readings before trading
+  max_pay_cents: 97            # Never pay more than 97c for a locked contract
+  min_pay_cents: 3             # Don't bother below 3c
+  min_edge_cents: 2            # Minimum edge (100 - price_cents) to enter
+
+  # Position sizing
+  kelly_fraction: 0.05         # Very conservative — small edges, many trades
+  min_trade_usd: 0.50
+  max_trade_usd: 2.00
+  max_per_ticker_usd: 2.00
+
+  # Risk limits
+  daily_loss_limit_pct: 0.10   # Kill bot if down 10% in one day (~$2.00)
+  max_open_positions: 5        # Allow more positions since each is near-certain
+  min_balance_usd: 10.00       # Pause if balance drops below this
+  cancel_after_seconds: 180    # Cancel unfilled resting orders after 3 min
 
 # Loop timing
-loop_sleep_seconds: 60             # Seconds between each cycle
-scan_every_n_cycles: 5             # Re-scan Kalshi markets every N cycles
+loop_sleep_seconds: 60         # Seconds between each cycle
+scan_every_n_cycles: 3         # Scan every 3 min (METAR refreshes every cycle)
 
-# Markets to trade
+# Horizons — v3 only trades same_day (observation-based)
 horizons:
   - same_day
-  - next_day
 
 cities:
   - code: NYC
@@ -81,4 +86,4 @@ markets:
 # Telegram
 telegram:
   enabled: true
-  daily_summary_hour_utc: 5       # Send daily summary at 5 AM UTC (midnight CT)
+  daily_summary_hour_utc: 5    # Send daily summary at 5 AM UTC
