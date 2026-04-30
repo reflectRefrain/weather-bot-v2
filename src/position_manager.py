@@ -1,23 +1,15 @@
 """
-Position manager for Weather Bot v2.
+Position manager for Weather Bot v3.
 
 Manages PAPER and LIVE positions.
 - Reads open positions from SQLite.
 - Checks latest market prices from Kalshi.
 - Closes positions when TP or SL is hit.
 - Writes realized PnL.
-- Writes exit_price_cents and exit_reason back to positions table.
-- Logs events.
-- Supports dry-run mode.
-
-Usage:
-  python /app/src/position_manager.py dry-run
-  python /app/src/position_manager.py manage
-  python /app/src/position_manager.py test-paper-tp
-  python /app/src/position_manager.py test-paper-sl
-  python /app/src/position_manager.py cleanup-test
+- close_settled_positions(): detects Kalshi-settled markets and records final PnL.
 """
 
+import re
 import sys
 import datetime as dt
 from db import conn
@@ -28,6 +20,11 @@ from cooldown import add_cooldown
 
 TEST_TICKER = "TEST-POSITION-MANAGER"
 TEST_EXIT_PRICE = None
+
+MONTHS = {m: i + 1 for i, m in enumerate(
+    ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
+)}
+RE_TICKER_DATE = re.compile(r"-(\d{2})([A-Z]{3})(\d{2})-")
 
 
 def nowiso():
@@ -73,37 +70,42 @@ def extract_prices(market):
     na = cents(market.get("no_ask"))
     last = cents(market.get("last_price"))
 
-    if yb is None:
-        yb = cents(market.get("yes_bid_dollars"))
-    if ya is None:
-        ya = cents(market.get("yes_ask_dollars"))
-    if nb is None:
-        nb = cents(market.get("no_bid_dollars"))
-    if na is None:
-        na = cents(market.get("no_ask_dollars"))
-    if last is None:
-        last = cents(market.get("last_price_dollars"))
+    if yb is None: yb = cents(market.get("yes_bid_dollars"))
+    if ya is None: ya = cents(market.get("yes_ask_dollars"))
+    if nb is None: nb = cents(market.get("no_bid_dollars"))
+    if na is None: na = cents(market.get("no_ask_dollars"))
+    if last is None: last = cents(market.get("last_price_dollars"))
 
-    if yb is None and na is not None:
-        yb = 100 - na
-    if ya is None and nb is not None:
-        ya = 100 - nb
-    if nb is None and ya is not None:
-        nb = 100 - ya
-    if na is None and yb is not None:
-        na = 100 - yb
+    if yb is None and na is not None: yb = 100 - na
+    if ya is None and nb is not None: ya = 100 - nb
+    if nb is None and ya is not None: nb = 100 - ya
+    if na is None and yb is not None: na = 100 - yb
 
     return yb, ya, nb, na, last
+
+
+def target_date_from_ticker(tk: str):
+    """Parse YYYY-MM-DD target date from a Kalshi ticker string."""
+    m = RE_TICKER_DATE.search(tk or "")
+    if not m:
+        return None
+    yy = 2000 + int(m.group(1))
+    mo = MONTHS.get(m.group(2))
+    dd = int(m.group(3))
+    if not mo:
+        return None
+    try:
+        return dt.date(yy, mo, dd)
+    except Exception:
+        return None
 
 
 def get_exit_price_for_position(kalshi_client, ticker, side):
     if ticker == TEST_TICKER:
         return None
-
     resp = kalshi_client.get_market(ticker)
     market = resp.get("market") or resp
     yb, ya, nb, na, last = extract_prices(market)
-
     if side == "yes":
         return yb if yb is not None else last
     if side == "no":
@@ -122,101 +124,88 @@ def open_positions():
 
 
 def close_paper_position(row, exit_cents, reason, dry_run=True):
-    ticker = row["ticker"]
-    side = row["side"]
-    qty = int(row["qty"])
-    entry = int(row["avg_price_cents"])
+    ticker   = row["ticker"]
+    side     = row["side"]
+    qty      = int(row["qty"])
+    entry    = int(row["avg_price_cents"])
     realized = (int(exit_cents) - entry) * qty / 100.0
-    msg = f"{'DRY ' if dry_run else ''}PAPER EXIT {ticker} {side} qty={qty} entry={entry}c exit={exit_cents}c pnl=${realized:+.2f} reason={reason}"
-
+    msg = (
+        f"{'DRY ' if dry_run else ''}PAPER EXIT {ticker} {side} "
+        f"qty={qty} entry={entry}c exit={exit_cents}c pnl=${realized:+.2f} reason={reason}"
+    )
     if dry_run:
         log_event("INFO", "position_manager", msg)
-        return {
-            "ticker": ticker, "side": side, "qty": qty,
-            "entry_cents": entry, "exit_cents": int(exit_cents),
-            "realized_usd": realized, "reason": reason, "dry_run": True,
-        }
-
+        return {"ticker": ticker, "side": side, "qty": qty,
+                "entry_cents": entry, "exit_cents": int(exit_cents),
+                "realized_usd": realized, "reason": reason, "dry_run": True}
     with conn() as c:
         c.execute("""
-            INSERT INTO pnl(ticker, side, qty, entry_cents, exit_cents, realized_usd, closed_at, reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO pnl(ticker,side,qty,entry_cents,exit_cents,realized_usd,closed_at,reason)
+            VALUES(?,?,?,?,?,?,?,?)
         """, (ticker, side, qty, entry, int(exit_cents), realized, nowiso(), reason))
         c.execute(
-            "UPDATE positions SET status='CLOSED', exit_price_cents=?, exit_reason=? WHERE ticker=? AND status='OPEN'",
+            "UPDATE positions SET status='CLOSED', exit_price_cents=?, exit_reason=? "
+            "WHERE ticker=? AND status='OPEN'",
             (int(exit_cents), reason, ticker),
         )
-
     if reason == "SL":
         cd = add_cooldown(ticker, side, reason="SL")
-        log_event("WARN", "cooldown", f"Cooldown added {ticker} {side} until {cd['expires_at']} after SL")
-
+        log_event("WARN", "cooldown",
+                  f"Cooldown added {ticker} {side} until {cd['expires_at']} after SL")
     log_event("INFO", "position_manager", msg)
-    return {
-        "ticker": ticker, "side": side, "qty": qty,
-        "entry_cents": entry, "exit_cents": int(exit_cents),
-        "realized_usd": realized, "reason": reason, "dry_run": False,
-    }
+    return {"ticker": ticker, "side": side, "qty": qty,
+            "entry_cents": entry, "exit_cents": int(exit_cents),
+            "realized_usd": realized, "reason": reason, "dry_run": False}
 
 
 def close_live_position(kalshi_client, row, exit_cents, reason, dry_run=True):
-    ticker = row["ticker"]
-    side = row["side"]
-    qty = int(row["qty"])
-    entry = int(row["avg_price_cents"])
+    ticker   = row["ticker"]
+    side     = row["side"]
+    qty      = int(row["qty"])
+    entry    = int(row["avg_price_cents"])
     realized = (int(exit_cents) - entry) * qty / 100.0
 
     if dry_run:
         log_event("INFO", "position_manager",
-                  f"DRY LIVE EXIT {ticker} {side} qty={qty} entry={entry}c exit={exit_cents}c pnl=${realized:+.2f} reason={reason}")
-        return {
-            "ticker": ticker, "side": side, "qty": qty,
-            "entry_cents": entry, "exit_cents": int(exit_cents),
-            "realized_usd": realized, "reason": reason, "dry_run": True,
-        }
+                  f"DRY LIVE EXIT {ticker} {side} qty={qty} entry={entry}c "
+                  f"exit={exit_cents}c pnl=${realized:+.2f} reason={reason}")
+        return {"ticker": ticker, "side": side, "qty": qty,
+                "entry_cents": entry, "exit_cents": int(exit_cents),
+                "realized_usd": realized, "reason": reason, "dry_run": True}
 
     yes_price = int(exit_cents) if side == "yes" else None
-    no_price = int(exit_cents) if side == "no" else None
-
+    no_price  = int(exit_cents) if side == "no"  else None
     resp = kalshi_client.create_order(
-        ticker=ticker,
-        side=side,
-        action="sell",
-        count=qty,
-        type_="limit",
-        yes_price=yes_price,
-        no_price=no_price,
+        ticker=ticker, side=side, action="sell", count=qty, type_="limit",
+        yes_price=yes_price, no_price=no_price,
     )
     order_id = resp.get("order", {}).get("order_id", "unknown")
-
     with conn() as c:
         c.execute("""
-            INSERT INTO pnl(ticker, side, qty, entry_cents, exit_cents, realized_usd, closed_at, reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO pnl(ticker,side,qty,entry_cents,exit_cents,realized_usd,closed_at,reason)
+            VALUES(?,?,?,?,?,?,?,?)
         """, (ticker, side, qty, entry, int(exit_cents), realized, nowiso(), reason))
         c.execute(
-            "UPDATE positions SET status='CLOSED', exit_price_cents=?, exit_reason=? WHERE ticker=? AND status='OPEN'",
+            "UPDATE positions SET status='CLOSED', exit_price_cents=?, exit_reason=? "
+            "WHERE ticker=? AND status='OPEN'",
             (int(exit_cents), reason, ticker),
         )
-
     if reason == "SL":
         cd = add_cooldown(ticker, side, reason="SL")
-        log_event("WARN", "cooldown", f"Cooldown added {ticker} {side} until {cd['expires_at']} after SL")
-
+        log_event("WARN", "cooldown",
+                  f"Cooldown added {ticker} {side} until {cd['expires_at']} after SL")
     log_event("INFO", "position_manager",
-              f"LIVE EXIT {ticker} {side} qty={qty} entry={entry}c exit={exit_cents}c pnl=${realized:+.2f} order_id={order_id} reason={reason}")
-    return {
-        "ticker": ticker, "side": side, "qty": qty,
-        "entry_cents": entry, "exit_cents": int(exit_cents),
-        "realized_usd": realized, "reason": reason,
-        "dry_run": False, "order_id": order_id,
-    }
+              f"LIVE EXIT {ticker} {side} qty={qty} entry={entry}c "
+              f"exit={exit_cents}c pnl=${realized:+.2f} order_id={order_id} reason={reason}")
+    return {"ticker": ticker, "side": side, "qty": qty,
+            "entry_cents": entry, "exit_cents": int(exit_cents),
+            "realized_usd": realized, "reason": reason,
+            "dry_run": False, "order_id": order_id}
 
 
 def decision_for_position(row, exit_price_cents):
     tp = row["tp_price"]
     sl = row["sl_price"]
-
     if exit_price_cents is None or exit_price_cents <= 1:
         return "HOLD", "no_exit_price"
     if tp is not None and exit_price_cents >= int(tp):
@@ -226,19 +215,111 @@ def decision_for_position(row, exit_price_cents):
     return "HOLD", "inside_band"
 
 
-def manage_positions(kalshi_client=None, dry_run=True):
-    ensure_position_columns()
-    mode = get_mode()
+def close_settled_positions(kalshi_client) -> list:
+    """Detect Kalshi-settled markets and record final PnL in local DB.
 
-    if kalshi_client is None:
-        kalshi_client = KalshiClient()
+    For each OPEN position:
+      1. Check if target_date has passed (same-day contracts settle same day)
+      2. Call get_market to check status field
+      3. If status is 'settled' or 'finalized':
+           - result='yes' -> YES side wins (payout=100c), NO side loses (payout=0c)
+           - result='no'  -> NO side wins (payout=100c), YES side loses (payout=0c)
+      4. Write to pnl table and mark position CLOSED
 
+    Returns list of settlement result dicts.
+    """
     results = []
     rows = open_positions()
+    today = dt.date.today()
 
     for row in rows:
         ticker = row["ticker"]
-        side = row["side"]
+        side   = row["side"]
+        qty    = int(row["qty"])
+        entry  = int(row["avg_price_cents"])
+
+        # Only check contracts whose target date <= today
+        tdate = target_date_from_ticker(ticker)
+        if tdate is None or tdate > today:
+            continue
+
+        try:
+            resp   = kalshi_client.get_market(ticker)
+            market = resp.get("market") or resp
+            status = (market.get("status") or "").lower()
+            result = (market.get("result") or "").lower()
+        except Exception as e:
+            log_event("ERROR", "position_manager",
+                      f"settlement check failed {ticker}: {str(e)[:120]}")
+            continue
+
+        settled_statuses = {"settled", "finalized", "resolved", "closed"}
+        if status not in settled_statuses:
+            continue   # not settled yet — skip
+        if result not in ("yes", "no"):
+            continue   # no result yet — skip
+
+        # Payout: winner gets 100c, loser gets 0c
+        if result == side:
+            exit_cents = 100   # we won
+            outcome    = "WIN"
+        else:
+            exit_cents = 0     # we lost
+            outcome    = "LOSS"
+
+        realized = (exit_cents - entry) * qty / 100.0
+
+        with conn() as c:
+            # Avoid duplicate pnl rows
+            existing = c.execute(
+                "SELECT 1 FROM pnl WHERE ticker=? AND reason='SETTLEMENT'", (ticker,)
+            ).fetchone()
+            if existing:
+                continue
+            c.execute("""
+                INSERT INTO pnl(ticker,side,qty,entry_cents,exit_cents,realized_usd,closed_at,reason)
+                VALUES(?,?,?,?,?,?,?,?)
+            """, (ticker, side, qty, entry, exit_cents, realized, nowiso(), "SETTLEMENT"))
+            c.execute(
+                "UPDATE positions SET status='CLOSED', exit_price_cents=?, exit_reason=? "
+                "WHERE ticker=? AND status='OPEN'",
+                (exit_cents, f"SETTLEMENT_{outcome}", ticker),
+            )
+
+        log_event("INFO", "position_manager",
+                  f"SETTLEMENT {outcome} {ticker} {side} qty={qty} "
+                  f"entry={entry}c exit={exit_cents}c pnl=${realized:+.2f} "
+                  f"market_result={result}")
+        results.append({
+            "ticker":       ticker,
+            "side":         side,
+            "qty":          qty,
+            "entry_cents":  entry,
+            "exit_cents":   exit_cents,
+            "realized_usd": realized,
+            "outcome":      outcome,
+            "market_result": result,
+            "action":       "SETTLEMENT",
+        })
+
+    return results
+
+
+def manage_positions(kalshi_client=None, dry_run=True):
+    ensure_position_columns()
+    mode = get_mode()
+    if kalshi_client is None:
+        kalshi_client = KalshiClient()
+
+    # ── First: close any already-settled contracts ─────────────────────────────
+    settlements = close_settled_positions(kalshi_client)
+    results     = list(settlements)
+
+    # ── Then: manage still-open positions with TP/SL ────────────────────────
+    rows = open_positions()
+    for row in rows:
+        ticker = row["ticker"]
+        side   = row["side"]
 
         if ticker == TEST_TICKER and TEST_EXIT_PRICE is not None:
             exit_price = int(TEST_EXIT_PRICE)
@@ -254,7 +335,6 @@ def manage_positions(kalshi_client=None, dry_run=True):
                 continue
 
         action, reason = decision_for_position(row, exit_price)
-
         if action in ("TP", "SL"):
             if mode == "paper":
                 result = close_paper_position(row, exit_price, action, dry_run=dry_run)
@@ -265,13 +345,13 @@ def manage_positions(kalshi_client=None, dry_run=True):
             results.append(result)
         else:
             results.append({
-                "ticker": ticker,
-                "side": side,
-                "action": "HOLD",
-                "reason": reason,
+                "ticker":          ticker,
+                "side":            side,
+                "action":          "HOLD",
+                "reason":          reason,
                 "exit_price_cents": exit_price,
-                "tp_price": row["tp_price"],
-                "sl_price": row["sl_price"],
+                "tp_price":        row["tp_price"],
+                "sl_price":        row["sl_price"],
             })
 
     return results
@@ -289,20 +369,15 @@ def make_test_position(kind):
     global TEST_EXIT_PRICE
     cleanup_test_position()
     avg, tp, sl = 50, 55, 40
-
-    if kind == "tp":
-        TEST_EXIT_PRICE = 55
-    elif kind == "sl":
-        TEST_EXIT_PRICE = 40
-    else:
-        TEST_EXIT_PRICE = 50
-
+    if kind == "tp":   TEST_EXIT_PRICE = 55
+    elif kind == "sl": TEST_EXIT_PRICE = 40
+    else:              TEST_EXIT_PRICE = 50
     with conn() as c:
         c.execute("""
             INSERT OR REPLACE INTO positions
-                (ticker, side, qty, avg_price_cents, opened_at, tp_price, sl_price, status)
-            VALUES (?, 'yes', 4, ?, ?, ?, ?, 'OPEN')
-        """, (TEST_TICKER, avg, nowiso(), tp, sl))
+                (ticker,side,qty,avg_price_cents,opened_at,tp_price,sl_price,status)
+            VALUES (?,?,4,?,?,?,?,'OPEN')
+        """, (TEST_TICKER, "yes", avg, nowiso(), tp, sl))
     print(f"created test {kind.upper()} position:", TEST_TICKER, "fake_exit=", TEST_EXIT_PRICE)
 
 
@@ -317,7 +392,6 @@ def cleanup_test_position():
 
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "dry-run"
-
     if cmd == "dry-run":
         print_results(manage_positions(dry_run=True))
     elif cmd == "manage":
@@ -331,10 +405,12 @@ def main():
     elif cmd == "cleanup-test":
         cleanup_test_position()
         print("cleanup done")
+    elif cmd == "check-settlements":
+        k = KalshiClient()
+        print_results(close_settled_positions(k))
     else:
         print("unknown command:", cmd)
-        print("commands: dry-run, manage, test-paper-tp, test-paper-sl, cleanup-test")
-        raise SystemExit(1)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
