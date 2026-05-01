@@ -7,6 +7,7 @@ Manages PAPER and LIVE positions.
 - Closes positions when TP or SL is hit.
 - Writes realized PnL.
 - close_settled_positions(): detects Kalshi-settled markets and records final PnL.
+  Also force-expires any position whose target date is strictly in the past.
 """
 
 import re
@@ -215,22 +216,44 @@ def decision_for_position(row, exit_price_cents):
     return "HOLD", "inside_band"
 
 
-def close_settled_positions(kalshi_client) -> list:
-    """Detect Kalshi-settled markets and record final PnL in local DB.
+def force_expire_past_positions() -> list:
+    """Force-close any OPEN position whose ticker target date is strictly before today.
 
-    For each OPEN position:
-      1. Check if target_date has passed (same-day contracts settle same day)
-      2. Call get_market to check status field
-      3. If status is 'settled' or 'finalized':
-           - result='yes' -> YES side wins (payout=100c), NO side loses (payout=0c)
-           - result='no'  -> NO side wins (payout=100c), YES side loses (payout=0c)
-      4. Write to pnl table and mark position CLOSED
-
-    Returns list of settlement result dicts.
+    These contracts are 100% settled — Kalshi will never update them again.
+    We can't know the win/loss without the fills API, so we record exit as None
+    and reason as EXPIRED so they don't block the position cap.
     """
+    today = dt.date.today()
     results = []
     rows = open_positions()
-    today = dt.date.today()
+    for row in rows:
+        ticker = row["ticker"]
+        tdate  = target_date_from_ticker(ticker)
+        if tdate is None or tdate >= today:
+            continue
+        with conn() as c:
+            c.execute(
+                "UPDATE positions SET status='CLOSED', exit_reason='EXPIRED' "
+                "WHERE ticker=? AND status='OPEN'",
+                (ticker,),
+            )
+        log_event("WARN", "position_manager",
+                  f"FORCE_EXPIRED {ticker} — target_date={tdate} is before today={today}")
+        results.append({"ticker": ticker, "action": "FORCE_EXPIRED", "target_date": str(tdate)})
+    return results
+
+
+def close_settled_positions(kalshi_client) -> list:
+    """Detect Kalshi-settled markets and record final PnL.
+
+    For OPEN same-day or future positions:
+      1. Call get_market to check status + result fields.
+      2. If settled: payout = 100c (winner) or 0c (loser).
+      3. Write to pnl table and mark CLOSED.
+    """
+    results = []
+    today   = dt.date.today()
+    rows    = open_positions()
 
     for row in rows:
         ticker = row["ticker"]
@@ -238,7 +261,6 @@ def close_settled_positions(kalshi_client) -> list:
         qty    = int(row["qty"])
         entry  = int(row["avg_price_cents"])
 
-        # Only check contracts whose target date <= today
         tdate = target_date_from_ticker(ticker)
         if tdate is None or tdate > today:
             continue
@@ -255,22 +277,15 @@ def close_settled_positions(kalshi_client) -> list:
 
         settled_statuses = {"settled", "finalized", "resolved", "closed"}
         if status not in settled_statuses:
-            continue   # not settled yet — skip
+            continue
         if result not in ("yes", "no"):
-            continue   # no result yet — skip
+            continue
 
-        # Payout: winner gets 100c, loser gets 0c
-        if result == side:
-            exit_cents = 100   # we won
-            outcome    = "WIN"
-        else:
-            exit_cents = 0     # we lost
-            outcome    = "LOSS"
-
-        realized = (exit_cents - entry) * qty / 100.0
+        exit_cents = 100 if result == side else 0
+        outcome    = "WIN" if result == side else "LOSS"
+        realized   = (exit_cents - entry) * qty / 100.0
 
         with conn() as c:
-            # Avoid duplicate pnl rows
             existing = c.execute(
                 "SELECT 1 FROM pnl WHERE ticker=? AND reason='SETTLEMENT'", (ticker,)
             ).fetchone()
@@ -291,15 +306,10 @@ def close_settled_positions(kalshi_client) -> list:
                   f"entry={entry}c exit={exit_cents}c pnl=${realized:+.2f} "
                   f"market_result={result}")
         results.append({
-            "ticker":       ticker,
-            "side":         side,
-            "qty":          qty,
-            "entry_cents":  entry,
-            "exit_cents":   exit_cents,
-            "realized_usd": realized,
-            "outcome":      outcome,
-            "market_result": result,
-            "action":       "SETTLEMENT",
+            "ticker": ticker, "side": side, "qty": qty,
+            "entry_cents": entry, "exit_cents": exit_cents,
+            "realized_usd": realized, "outcome": outcome,
+            "market_result": result, "action": "SETTLEMENT",
         })
 
     return results
@@ -311,11 +321,15 @@ def manage_positions(kalshi_client=None, dry_run=True):
     if kalshi_client is None:
         kalshi_client = KalshiClient()
 
-    # ── First: close any already-settled contracts ─────────────────────────────
-    settlements = close_settled_positions(kalshi_client)
-    results     = list(settlements)
+    # 1. Force-expire any position whose date is strictly in the past
+    expired = force_expire_past_positions()
+    results = list(expired)
 
-    # ── Then: manage still-open positions with TP/SL ────────────────────────
+    # 2. Close any today contracts that Kalshi has already settled
+    settlements = close_settled_positions(kalshi_client)
+    results.extend(settlements)
+
+    # 3. Manage still-open positions with TP/SL bands
     rows = open_positions()
     for row in rows:
         ticker = row["ticker"]
@@ -345,13 +359,13 @@ def manage_positions(kalshi_client=None, dry_run=True):
             results.append(result)
         else:
             results.append({
-                "ticker":          ticker,
-                "side":            side,
-                "action":          "HOLD",
-                "reason":          reason,
+                "ticker":           ticker,
+                "side":             side,
+                "action":           "HOLD",
+                "reason":           reason,
                 "exit_price_cents": exit_price,
-                "tp_price":        row["tp_price"],
-                "sl_price":        row["sl_price"],
+                "tp_price":         row["tp_price"],
+                "sl_price":         row["sl_price"],
             })
 
     return results
@@ -408,6 +422,8 @@ def main():
     elif cmd == "check-settlements":
         k = KalshiClient()
         print_results(close_settled_positions(k))
+    elif cmd == "force-expire":
+        print_results(force_expire_past_positions())
     else:
         print("unknown command:", cmd)
         sys.exit(1)

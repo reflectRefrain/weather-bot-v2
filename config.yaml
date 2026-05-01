@@ -22,22 +22,22 @@ risk:
   min_edge_cents: 2            # Minimum edge (100 - price_cents) to enter
 
   # Position sizing
-  kelly_fraction: 0.05         # Very conservative — small edges, many trades
+  kelly_fraction: 0.05
   min_trade_usd: 0.50
   max_trade_usd: 2.00
   max_per_ticker_usd: 2.00
 
   # Risk limits
-  daily_loss_limit_pct: 0.10   # Kill bot if down 10% in one day (~$2.00)
-  max_open_positions: 5        # Allow more positions since each is near-certain
-  min_balance_usd: 10.00       # Pause if balance drops below this
-  cancel_after_seconds: 180    # Cancel unfilled resting orders after 3 min
+  daily_loss_limit_pct: 0.10
+  max_open_positions: 8        # Bumped from 5 — gives headroom if positions lag settling
+  min_balance_usd: 10.00
+  cancel_after_seconds: 180
 
 # Loop timing
-loop_sleep_seconds: 60         # Seconds between each cycle
-scan_every_n_cycles: 3         # Scan every 3 min (METAR refreshes every cycle)
+loop_sleep_seconds: 60
+scan_every_n_cycles: 3
 
-# Horizons — v3 only trades same_day (observation-based)
+# Horizons
 horizons:
   - same_day
 
@@ -86,4 +86,4 @@ markets:
 # Telegram
 telegram:
   enabled: true
-  daily_summary_hour_utc: 5    # Send daily summary at 5 AM UTC
+  daily_summary_hour_utc: 5
