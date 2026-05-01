@@ -10,6 +10,7 @@ RULES ENFORCED HERE:
   7. Cancel stale resting orders automatically (mark expired on 400/404, stop retrying)
   8. Block entry if resting order already exists for same ticker
   9. Block same-day HIGHTEMP YES if obs shows socked-in conditions
+ 10. Free cash reserve guard — never spend below min_free_cash_usd
 """
 import datetime as dt, math, yaml, os
 from db import conn, init_db
@@ -27,6 +28,7 @@ CITY_METAR = {
     "AUS":  "KAUS",
     "PHIL": "KPHL",
     "BOS":  "KBOS",
+    "HOU":  "KHOU",
 }
 
 
@@ -69,12 +71,14 @@ def set_kill_switch(on: bool):
     )
 
 
+def free_cash_usd(kalshi_client) -> float:
+    """Return free (uninvested) cash only — not portfolio value."""
+    resp = kalshi_client.balance()
+    return resp.get("balance", 0) / 100.0
+
+
 def total_balance_usd(kalshi_client) -> float:
-    """Return free cash + open position portfolio value in USD.
-    Kalshi 'balance' field is free cash only (cents).
-    'portfolio_value' is the mark-to-market value of open positions (cents).
-    Using both gives the correct total equity figure for loss tracking.
-    """
+    """Return free cash + open position portfolio value in USD."""
     resp = kalshi_client.balance()
     free_cash = resp.get("balance", 0) / 100.0
     portfolio = resp.get("portfolio_value", 0) / 100.0
@@ -83,12 +87,13 @@ def total_balance_usd(kalshi_client) -> float:
 
 def daily_loss_check(kalshi_client, cfg) -> bool:
     try:
-        balance = total_balance_usd(kalshi_client)
+        balance   = total_balance_usd(kalshi_client)
         day_start = float(get_state("day_start_balance") or balance)
-        loss = day_start - balance
-        limit = cfg["bankroll_usd"] * cfg["risk"]["daily_loss_limit_pct"]
+        loss      = day_start - balance
+        limit     = cfg["bankroll_usd"] * cfg["risk"]["daily_loss_limit_pct"]
         log_event("INFO", "executor",
-                  f"Daily loss check: start=${day_start:.2f} now=${balance:.2f} loss=${loss:.2f} limit=${limit:.2f}")
+                  f"Daily loss check: start=${day_start:.2f} now=${balance:.2f} "
+                  f"loss=${loss:.2f} limit=${limit:.2f}")
         if loss >= limit:
             log_event("WARN", "executor",
                       f"Daily loss limit hit: lost ${loss:.2f} vs limit ${limit:.2f}")
@@ -123,7 +128,7 @@ def can_enter(ticker: str, cfg: dict) -> tuple:
     if resting_order_for(ticker):
         return False, f"resting_order_exists:{ticker}"
     open_pos = open_positions()
-    max_pos = cfg["risk"]["max_open_positions"]
+    max_pos  = cfg["risk"]["max_open_positions"]
     if len(open_pos) >= max_pos:
         return False, f"position_cap:{len(open_pos)}/{max_pos}"
     return True, ""
@@ -142,7 +147,7 @@ def obs_filter_check(candidate: dict) -> tuple:
         return False, ""
     if candidate.get("side") != "yes":
         return False, ""
-    city = candidate.get("city", "")
+    city    = candidate.get("city", "")
     station = CITY_METAR.get(city)
     if not station:
         return False, ""
@@ -150,7 +155,8 @@ def obs_filter_check(candidate: dict) -> tuple:
         from metar_client import MetarClient, is_socked_in
         obs = MetarClient().latest(station)
         if obs.get("error"):
-            log_event("WARN", "executor", f"obs_filter: METAR error {station}: {obs['error']}")
+            log_event("WARN", "executor",
+                      f"obs_filter: METAR error {station}: {obs['error']}")
             return False, ""
         if is_socked_in(obs):
             reason = (
@@ -166,15 +172,28 @@ def obs_filter_check(candidate: dict) -> tuple:
 
 def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
     init_db()
-    ticker = candidate["ticker"]
-    side = candidate["side"]
+    ticker  = candidate["ticker"]
+    side    = candidate["side"]
     price_c = candidate["price_cents"]
-    p = candidate["model_prob"]
+    p       = candidate["model_prob"]
 
-    bankroll = float(cfg.get("bankroll_usd", 100))
-    b = (100 - price_c) / price_c if price_c < 100 else 0.0
-    f_raw = max(0.0, (p * b - (1 - p)) / b) if b > 0 else 0.0
-    f_scaled = f_raw * float(cfg["risk"].get("kelly_fraction", 0.25))
+    # ── Free cash reserve guard ───────────────────────────────────────────
+    # Stop placing orders when free cash drops to or below the reserve.
+    # This prevents a single scan cycle from spending the entire bankroll.
+    min_free = float(cfg["risk"].get("min_free_cash_usd", 2.0))
+    try:
+        cash = free_cash_usd(kalshi_client)
+        if cash <= min_free:
+            reason = f"free_cash_reserve: ${cash:.2f} <= ${min_free:.2f}"
+            log_event("INFO", "executor", f"SKIP {ticker} — {reason}")
+            return {"success": False, "reason": reason}
+    except Exception as e:
+        log_event("ERROR", "executor", f"free_cash check failed: {e}")
+
+    bankroll  = float(cfg.get("bankroll_usd", 100))
+    b         = (100 - price_c) / price_c if price_c < 100 else 0.0
+    f_raw     = max(0.0, (p * b - (1 - p)) / b) if b > 0 else 0.0
+    f_scaled  = f_raw * float(cfg["risk"].get("kelly_fraction", 0.25))
     kelly_usd = min(
         f_scaled * bankroll,
         float(cfg["risk"].get("max_trade_usd", 2.0)),
@@ -182,7 +201,7 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
     )
     kelly_usd = max(kelly_usd, float(cfg["risk"].get("min_trade_usd", 1.0)))
 
-    # Obs filter — block socked-in same-day high temp YES entries
+    # Obs filter
     blocked_by_obs, obs_reason = obs_filter_check(candidate)
     if blocked_by_obs:
         log_event("INFO", "executor", f"OBS_BLOCK {ticker} — {obs_reason}")
@@ -202,11 +221,11 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
     if daily_loss_check(kalshi_client, cfg):
         return {"success": False, "reason": "daily_loss_limit"}
 
-    qty = max(1, math.floor((kelly_usd * 100) / price_c))
+    qty      = max(1, math.floor((kelly_usd * 100) / price_c))
     cost_usd = qty * price_c / 100.0
-    max_usd = cfg["risk"]["max_per_ticker_usd"]
+    max_usd  = cfg["risk"]["max_per_ticker_usd"]
     if cost_usd > max_usd:
-        qty = max(1, math.floor((max_usd * 100) / price_c))
+        qty      = max(1, math.floor((max_usd * 100) / price_c))
         cost_usd = qty * price_c / 100.0
 
     mode = get_state("mode") or cfg.get("mode", "paper")
@@ -215,7 +234,7 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
         log_event("INFO", "executor",
                   f"PAPER BUY {ticker} {side} x{qty} @ {price_c}c = ${cost_usd:.2f}")
         tp = min(99, price_c + max(10, int(round(candidate["edge_cents"]))))
-        sl = max(1, price_c - max(5, int(round(candidate["edge_cents"] * 0.5))))
+        sl = max(1,  price_c - max(5,  int(round(candidate["edge_cents"] * 0.5))))
         with conn() as c:
             c.execute(
                 """
@@ -223,14 +242,15 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
                     (ticker, side, qty, avg_price_cents, opened_at, tp_price, sl_price, status)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN')
                 """,
-                (ticker, side, qty, price_c, dt.datetime.utcnow().isoformat(), tp, sl),
+                (ticker, side, qty, price_c,
+                 dt.datetime.utcnow().isoformat(), tp, sl),
             )
         return {"success": True, "order_id": f"paper-{ticker}", "qty": qty,
                 "cost_usd": cost_usd, "mode": "paper"}
 
     try:
         yes_price = price_c if side == "yes" else None
-        no_price = price_c if side == "no" else None
+        no_price  = price_c if side == "no"  else None
         resp = kalshi_client.create_order(
             ticker=ticker, side=side, action="buy", count=qty,
             type_="limit", yes_price=yes_price, no_price=no_price,
@@ -243,7 +263,8 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
                     (order_id, ticker, side, action, qty, price_cents, status, placed_at)
                 VALUES (?, ?, ?, 'buy', ?, ?, 'resting', ?)
                 """,
-                (order_id, ticker, side, qty, price_c, dt.datetime.utcnow().isoformat()),
+                (order_id, ticker, side, qty, price_c,
+                 dt.datetime.utcnow().isoformat()),
             )
         log_event("INFO", "executor",
                   f"LIVE BUY {ticker} {side} x{qty} @ {price_c}c order_id={order_id}")
@@ -255,10 +276,7 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
 
 
 def cancel_stale_orders(kalshi_client, cfg: dict):
-    """Cancel resting orders older than cancel_after_seconds.
-    On 400/404 (order already gone on Kalshi side), mark as 'expired' and stop retrying.
-    On 5xx or network errors, leave as 'resting' to retry next cycle.
-    """
+    """Cancel resting orders older than cancel_after_seconds."""
     max_age = cfg["risk"].get("cancel_after_seconds", 120)
     with conn() as c:
         stale = c.execute(
@@ -281,7 +299,6 @@ def cancel_stale_orders(kalshi_client, cfg: dict):
                       f"Cancelled stale order {row['order_id']} {row['ticker']}")
         except Exception as e:
             err = str(e)
-            # 400/404 = order no longer exists on Kalshi — stop retrying
             if "400" in err or "404" in err or "not found" in err.lower() or "does not exist" in err.lower():
                 with conn() as c:
                     c.execute(
@@ -291,6 +308,5 @@ def cancel_stale_orders(kalshi_client, cfg: dict):
                 log_event("INFO", "executor",
                           f"Order {row['order_id']} already gone on Kalshi — marked expired")
             else:
-                # 5xx or network error — log but leave as resting to retry
                 log_event("ERROR", "executor",
                           f"cancel_order failed {row['order_id']}: {err[:120]}")

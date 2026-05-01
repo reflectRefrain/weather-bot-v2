@@ -3,41 +3,35 @@
 #  Strategy: lockin_v3 (observation-based)
 # ─────────────────────────────────────────
 
-# Trading mode: paper = no real orders, live = real orders
 mode: live
-
-# Active strategy
 strategy: lockin_v3
-
-# Bankroll (updated Apr 30 2026)
 bankroll_usd: 19.95
 
-# Risk controls
 risk:
-  # Lock-in strategy gates
-  min_lockin_prob: 0.98        # Only trade when model is >=98% certain
-  min_obs_count: 2             # Need at least 2 METAR readings before trading
-  max_pay_cents: 97            # Never pay more than 97c for a locked contract
-  min_pay_cents: 3             # Don't bother below 3c
-  min_edge_cents: 2            # Minimum edge (100 - price_cents) to enter
+  min_lockin_prob: 0.98
+  min_obs_count: 2
+  max_pay_cents: 97
+  min_pay_cents: 3
+  min_edge_cents: 2
 
-  # Position sizing
   kelly_fraction: 0.05
   min_trade_usd: 0.50
   max_trade_usd: 2.00
   max_per_ticker_usd: 2.00
 
-  # Risk limits
   daily_loss_limit_pct: 0.10
-  max_open_positions: 8        # Bumped from 5 — gives headroom if positions lag settling
+  max_open_positions: 8
   min_balance_usd: 10.00
   cancel_after_seconds: 180
 
-# Loop timing
+  # Free cash reserve — bot stops placing orders when free cash is at or below this.
+  # Prevents a single scan cycle from spending the entire bankroll.
+  # Set to ~10% of bankroll so there's always dry powder.
+  min_free_cash_usd: 2.00
+
 loop_sleep_seconds: 60
 scan_every_n_cycles: 3
 
-# Horizons
 horizons:
   - same_day
 
@@ -83,7 +77,6 @@ markets:
   - HIGHTEMP
   - LOWTEMP
 
-# Telegram
 telegram:
   enabled: true
   daily_summary_hour_utc: 5
