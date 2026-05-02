@@ -64,11 +64,14 @@ MONTHS = {m: i + 1 for i, m in enumerate(
     ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
 )}
 
-# Entry time windows (local hour, inclusive)
-SAME_DAY_ENTRY_START = 8   # 8 AM local — after markets reprice with morning obs
+# ── Entry time windows (local hour, inclusive) ────────────────────────────────
+# LOCK-IN STRATEGY: same_day entry starts at 2PM local — by this point METAR
+# obs have diverged enough from morning forecasts to create genuine edge.
+# Morning (8AM-2PM) is pure forecast-betting territory — avoid it.
+SAME_DAY_ENTRY_START = 14  # 2 PM local — obs-anchored lock-in window opens
 SAME_DAY_ENTRY_END   = 15  # 3 PM local — before late-day illiquidity
-NEXT_DAY_ENTRY_START = 6   # 6 AM local — fresh NOAA forecast
-NEXT_DAY_ENTRY_END   = 10  # 10 AM local — morning window only
+NEXT_DAY_ENTRY_START = 6   # kept for reference, not used (next_day disabled in config)
+NEXT_DAY_ENTRY_END   = 10
 
 
 def log_event(level, module, message):
@@ -136,9 +139,13 @@ def horizon_of(target_date_iso):
 def is_valid_entry_time(horizon: str, city: str) -> bool:
     """Gate entries by local time of day.
 
-    same_day:  8 AM – 3 PM local (after morning reprice, before illiquidity)
-    next_day:  6 AM – 10 AM local (fresh NOAA, next-day market just opened)
-    weekly:    always allowed (long time horizon, time-of-day irrelevant)
+    LOCK-IN STRATEGY:
+    same_day: 2PM – 3PM local only. By 2PM, METAR obs have diverged enough
+    from morning forecasts to create genuine edge. Morning entries are pure
+    forecast-betting with no obs anchor advantage.
+
+    next_day: disabled via config horizons. Window kept for reference.
+    weekly:   always allowed.
     """
     try:
         tz = ZoneInfo(CITY_TZ.get(city, "America/New_York"))
@@ -149,7 +156,7 @@ def is_valid_entry_time(horizon: str, city: str) -> bool:
             return NEXT_DAY_ENTRY_START <= hour <= NEXT_DAY_ENTRY_END
         return True
     except Exception:
-        return True  # default allow on tz error
+        return True
 
 
 def _d2c(v):
@@ -188,18 +195,18 @@ def fetch_single(k, ticker):
 
 
 def score_candidates(markets, noaa_client, metar_client, cfg):
-    """Score each market dict against NOAA forecast + METAR obs.
+    """Score each market against NOAA forecast + METAR obs anchor.
 
-    Improvements over v1:
-      - time_adjusted_sigma: sigma shrinks during the day for same_day markets
-      - adjusted_forecast: obs anchors the forecast floor/ceil for same_day
-      - is_valid_entry_time: only enter same_day 8AM-3PM, next_day 6AM-10AM
-      - min_model_prob: don't trade unless model >= 70% confident
-      - min/max entry cents read from config (not hardcoded)
+    LOCK-IN STRATEGY:
+    - Entry only 2PM-3PM local (obs-anchored window)
+    - min_model_prob from config (default 0.80 for lock-in confidence)
+    - min/max entry cents from config
+    - time_adjusted_sigma shrinks uncertainty as day progresses
+    - adjusted_forecast anchors effective forecast to current obs
     """
     from model import sigma_for, time_adjusted_sigma, adjusted_forecast, yes_prob, market_mid_prob
     risk = cfg.get("risk", {})
-    min_model_prob  = float(risk.get("min_model_prob",  0.70))
+    min_model_prob  = float(risk.get("min_model_prob",  0.80))
     min_edge_cents  = float(risk.get("min_edge_cents",  8))
     min_entry_cents = float(risk.get("min_entry_cents", 20))
     max_entry_cents = float(risk.get("max_entry_cents", 90))
@@ -225,7 +232,6 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
         if not coords:
             continue
 
-        # ── Entry time gate ──────────────────────────────────────────────
         if not is_valid_entry_time(hz, city):
             continue
 
@@ -245,7 +251,6 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
         except Exception:
             continue
 
-        # ── Fetch METAR obs ──────────────────────────────────────────────
         obs_f = None
         try:
             station = CITY_METAR.get(city)
@@ -255,10 +260,7 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
         except Exception:
             pass
 
-        # ── Anchor forecast with current obs (same_day only) ─────────────
         effective_forecast = adjusted_forecast(forecast_f, obs_f, var, hz)
-
-        # ── Time-adjusted sigma ──────────────────────────────────────────
         base_sigma = sigma_for(var, hz)
         sigma      = time_adjusted_sigma(base_sigma, hz, city)
 
@@ -273,7 +275,6 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
         edge_yes = (mp - mid) * 100
         edge_no  = ((1 - mp) - (1 - mid)) * 100
 
-        # ── Min model probability gate ───────────────────────────────────
         if mp < min_model_prob and (1 - mp) < min_model_prob:
             continue
 
