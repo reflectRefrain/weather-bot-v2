@@ -11,7 +11,7 @@ from executor import (place_order, cancel_stale_orders, daily_loss_check,
                       kill_switch_on, set_state, get_state, log_event)
 from reconcile import sync
 from position_manager import manage_positions
-from telegram_bot import notify, run_bot_async
+from telegram_bot import notify, run_bot_async, build_trade_alert, build_close_alert, send_daily_summary
 
 CONFIG_PATH = os.getenv("CONFIG_PATH", "/app/config.yaml")
 
@@ -40,6 +40,17 @@ def init_day_balance(kalshi_client):
     except Exception as e:
         log(f"Could not record day start balance: {e}")
 
+async def daily_summary_loop(cfg):
+    """Send daily summary at the configured UTC hour (default 5 AM UTC = midnight CT)."""
+    summary_hour = cfg.get("telegram", {}).get("daily_summary_hour_utc", 5)
+    sent_today = None
+    while True:
+        now = dt.datetime.utcnow()
+        if now.hour == summary_hour and sent_today != now.date():
+            await send_daily_summary()
+            sent_today = now.date()
+        await asyncio.sleep(60)
+
 async def trader_loop():
     init_db()
     cfg     = load_config()
@@ -50,7 +61,7 @@ async def trader_loop():
 
     set_state("mode", cfg.get("mode", "paper"))
     log(f"Starting in {cfg.get('mode','paper').upper()} mode")
-    await notify("Weather Bot v2 started\nMode: " + cfg.get('mode','paper').upper())
+    await notify("\U0001f916 Weather Bot v2 started\nMode: " + cfg.get('mode','paper').upper())
 
     sleep_sec    = cfg.get("loop_sleep_seconds", 60)
     scan_every_n = cfg.get("scan_every_n_cycles", 5)
@@ -70,7 +81,7 @@ async def trader_loop():
 
             if daily_loss_check(k, cfg):
                 log("Daily loss limit hit - kill switch activated")
-                await notify("Daily loss limit hit - bot paused automatically")
+                await notify("\u26a0\ufe0f Daily loss limit hit — bot paused automatically")
                 await asyncio.sleep(sleep_sec)
                 continue
 
@@ -93,6 +104,8 @@ async def trader_loop():
                         f"entry={pm['entry_cents']}c exit={pm['exit_cents']}c "
                         f"pnl=${pm['realized_usd']:+.2f}"
                     )
+                    # Send rich close alert to Telegram
+                    await notify(build_close_alert(pm, kalshi_client=k))
 
             cancel_stale_orders(k, cfg)
 
@@ -114,19 +127,10 @@ async def trader_loop():
                     best   = candidates[0]
                     result = place_order(k, best, cfg)
                     if result["success"]:
-                        trade_type = "PAPER" if result["mode"] == "paper" else "LIVE"
-                        msg = (
-                            trade_type + " TRADE\n"
-                            + best["ticker"] + "\n"
-                            + best["side"].upper() + " x" + str(result["qty"])
-                            + " @ " + str(best["price_cents"]) + "c\n"
-                            + "Edge: " + str(best["edge_cents"]) + "c"
-                            + "  Size: $" + str(round(result["cost_usd"], 2)) + "\n"
-                            + "Forecast: " + str(best["forecast_f"]) + "F"
-                            + "  Obs: " + str(best["obs_f"]) + "F"
-                        )
-                        log(msg.replace("\n", " | "))
-                        await notify(msg)
+                        # Send rich trade alert to Telegram
+                        await notify(build_trade_alert(best, result))
+                        log(f"Order placed: {best['ticker']} {best['side']} "
+                            f"x{result['qty']} @ {best['price_cents']}c")
                     else:
                         log(f"Order skipped: {result['reason']}")
 
@@ -137,9 +141,11 @@ async def trader_loop():
         await asyncio.sleep(sleep_sec)
 
 async def main():
+    cfg         = load_config()
     tg_task     = asyncio.create_task(run_bot_async())
     trader_task = asyncio.create_task(trader_loop())
-    await asyncio.gather(tg_task, trader_task)
+    summary_task = asyncio.create_task(daily_summary_loop(cfg))
+    await asyncio.gather(tg_task, trader_task, summary_task)
 
 if __name__ == "__main__":
     asyncio.run(main())
