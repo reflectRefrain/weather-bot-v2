@@ -7,23 +7,23 @@
 # Trading mode: paper = no real orders, live = real orders
 mode: live
 
-# Bankroll (updated to current account value Apr 28 2026)
-bankroll_usd: 25.04
+# Bankroll (updated May 2 2026 — $200 deposit)
+bankroll_usd: 200.00
 
 # Risk controls
 risk:
-  daily_loss_limit_pct: 0.08       # Kill bot if down 8% in one day (~$2.00)
-  max_open_positions: 3            # Max concurrent open positions
+  daily_loss_limit_pct: 0.06       # Kill bot if down 6% in one day (~$12.00)
+  max_open_positions: 5            # Max concurrent open positions
   min_edge_cents: 8                # Min model edge over market mid (cents)
   max_spread_cents: 15             # Skip markets with spread wider than this
   min_entry_cents: 20              # Skip cheap low-conviction contracts
   max_entry_cents: 90              # Don't buy contracts more expensive than 90c
   min_model_prob: 0.70             # Only trade when model is >=70% confident
-  kelly_fraction: 0.15             # Conservative Kelly fraction on small bankroll
-  min_trade_usd: 0.50              # Minimum order size in dollars
-  max_trade_usd: 1.50              # Maximum order size per trade
-  max_per_ticker_usd: 1.50         # Hard cap per ticker regardless of Kelly
-  min_balance_usd: 10.00           # Pause if balance drops below this
+  kelly_fraction: 0.15             # Conservative Kelly fraction
+  min_trade_usd: 1.00              # Minimum order size in dollars
+  max_trade_usd: 6.00              # Maximum order size per trade (~3% of bankroll)
+  max_per_ticker_usd: 6.00         # Hard cap per ticker regardless of Kelly
+  min_balance_usd: 50.00           # Pause if balance drops below this (25% drawdown)
   cancel_after_seconds: 120        # Cancel unfilled resting orders after 2 min
   trade_start_hour_local: 6        # (legacy) kept for compatibility
 
