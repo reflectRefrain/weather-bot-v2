@@ -64,10 +64,6 @@ MONTHS = {m: i + 1 for i, m in enumerate(
     ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
 )}
 
-MIN_EDGE_CENTS  = 8    # minimum model edge over market mid
-MIN_ENTRY_CENTS = 20   # never buy contracts cheaper than 20c (low conviction)
-MAX_ENTRY_CENTS = 90
-
 # Entry time windows (local hour, inclusive)
 SAME_DAY_ENTRY_START = 8   # 8 AM local — after markets reprice with morning obs
 SAME_DAY_ENTRY_END   = 15  # 3 PM local — before late-day illiquidity
@@ -199,9 +195,15 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
       - adjusted_forecast: obs anchors the forecast floor/ceil for same_day
       - is_valid_entry_time: only enter same_day 8AM-3PM, next_day 6AM-10AM
       - min_model_prob: don't trade unless model >= 70% confident
+      - min/max entry cents read from config (not hardcoded)
     """
     from model import sigma_for, time_adjusted_sigma, adjusted_forecast, yes_prob, market_mid_prob
-    min_model_prob = float(cfg.get("risk", {}).get("min_model_prob", 0.70))
+    risk = cfg.get("risk", {})
+    min_model_prob  = float(risk.get("min_model_prob",  0.70))
+    min_edge_cents  = float(risk.get("min_edge_cents",  8))
+    min_entry_cents = float(risk.get("min_entry_cents", 20))
+    max_entry_cents = float(risk.get("max_entry_cents", 90))
+
     candidates = []
     for m in markets:
         var    = m.get("variable")
@@ -272,52 +274,53 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
         edge_no  = ((1 - mp) - (1 - mid)) * 100
 
         # ── Min model probability gate ───────────────────────────────────
-        # Only trade when the model is genuinely confident (>=70% by default)
         if mp < min_model_prob and (1 - mp) < min_model_prob:
             continue
 
-        if edge_yes >= MIN_EDGE_CENTS and MIN_ENTRY_CENTS <= ya <= MAX_ENTRY_CENTS:
+        if edge_yes >= min_edge_cents and min_entry_cents <= ya <= max_entry_cents:
             candidates.append({
-                "ticker":            ticker,
-                "side":              "yes",
-                "variable":          var,
-                "city":              city,
-                "horizon":           hz,
-                "strike_type":       st,
-                "strike_low":        lo,
-                "strike_high":       hi,
-                "yes_bid":           yb,
-                "yes_ask":           ya,
-                "model_prob":        mp,
-                "market_mid":        mid,
-                "edge_cents":        round(edge_yes, 2),
-                "forecast_f":        forecast_f,
+                "ticker":             ticker,
+                "side":               "yes",
+                "variable":           var,
+                "city":               city,
+                "horizon":            hz,
+                "strike_type":        st,
+                "strike_low":         lo,
+                "strike_high":        hi,
+                "yes_bid":            yb,
+                "yes_ask":            ya,
+                "model_prob":         mp,
+                "market_mid":         mid,
+                "edge_cents":         round(edge_yes, 2),
+                "forecast_f":         forecast_f,
                 "effective_forecast": effective_forecast,
-                "obs_f":             obs_f,
-                "sigma_used":        round(sigma, 2),
-                "price_cents":       ya,
+                "obs_f":              obs_f,
+                "sigma_used":         round(sigma, 2),
+                "price_cents":        ya,
+                "target_date":        m.get("target_date"),
             })
-        elif edge_no >= MIN_EDGE_CENTS and MIN_ENTRY_CENTS <= (100 - yb) <= MAX_ENTRY_CENTS:
+        elif edge_no >= min_edge_cents and min_entry_cents <= (100 - yb) <= max_entry_cents:
             no_ask = 100 - yb
             candidates.append({
-                "ticker":            ticker,
-                "side":              "no",
-                "variable":          var,
-                "city":              city,
-                "horizon":           hz,
-                "strike_type":       st,
-                "strike_low":        lo,
-                "strike_high":       hi,
-                "yes_bid":           yb,
-                "yes_ask":           ya,
-                "model_prob":        1 - mp,
-                "market_mid":        1 - mid,
-                "edge_cents":        round(edge_no, 2),
-                "forecast_f":        forecast_f,
+                "ticker":             ticker,
+                "side":               "no",
+                "variable":           var,
+                "city":               city,
+                "horizon":            hz,
+                "strike_type":        st,
+                "strike_low":         lo,
+                "strike_high":        hi,
+                "yes_bid":            yb,
+                "yes_ask":            ya,
+                "model_prob":         1 - mp,
+                "market_mid":         1 - mid,
+                "edge_cents":         round(edge_no, 2),
+                "forecast_f":         forecast_f,
                 "effective_forecast": effective_forecast,
-                "obs_f":             obs_f,
-                "sigma_used":        round(sigma, 2),
-                "price_cents":       no_ask,
+                "obs_f":              obs_f,
+                "sigma_used":         round(sigma, 2),
+                "price_cents":        no_ask,
+                "target_date":        m.get("target_date"),
             })
 
     candidates.sort(key=lambda x: x["edge_cents"], reverse=True)

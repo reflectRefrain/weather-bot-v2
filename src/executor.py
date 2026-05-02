@@ -10,6 +10,7 @@ RULES ENFORCED HERE:
   7. Cancel stale resting orders automatically (mark expired on 400/404, stop retrying)
   8. Block entry if resting order already exists for same ticker
   9. Block same-day HIGHTEMP YES if obs shows socked-in conditions
+  10. Block entry if any open position already exists for same city + target_date
 """
 import datetime as dt, math, yaml, os
 from db import conn, init_db
@@ -70,11 +71,7 @@ def set_kill_switch(on: bool):
 
 
 def total_balance_usd(kalshi_client) -> float:
-    """Return free cash + open position portfolio value in USD.
-    Kalshi 'balance' field is free cash only (cents).
-    'portfolio_value' is the mark-to-market value of open positions (cents).
-    Using both gives the correct total equity figure for loss tracking.
-    """
+    """Return free cash + open position portfolio value in USD."""
     resp = kalshi_client.balance()
     free_cash = resp.get("balance", 0) / 100.0
     portfolio = resp.get("portfolio_value", 0) / 100.0
@@ -114,10 +111,29 @@ def resting_order_for(ticker: str) -> bool:
     return row is not None
 
 
-def live_open_position_count(kalshi_client) -> int:
-    """Query Kalshi API directly for the number of currently open positions.
-    Falls back to local DB count if the API call fails.
+def city_date_open(city: str, target_date: str) -> bool:
+    """Return True if any open position already exists for this city + target_date.
+    Prevents the bot from opening multiple brackets on the same city/day.
     """
+    if not city or not target_date:
+        return False
+    with conn() as c:
+        row = c.execute(
+            """
+            SELECT p.ticker FROM positions p
+            JOIN markets m ON p.ticker = m.ticker
+            WHERE p.status = 'OPEN'
+              AND m.city = ?
+              AND m.target_date = ?
+            LIMIT 1
+            """,
+            (city, target_date),
+        ).fetchone()
+    return row is not None
+
+
+def live_open_position_count(kalshi_client) -> int:
+    """Sync from Kalshi then count open positions in DB."""
     try:
         sync_from_kalshi(kalshi_client)
     except Exception as e:
@@ -125,7 +141,7 @@ def live_open_position_count(kalshi_client) -> int:
     return len(open_positions())
 
 
-def can_enter(ticker: str, cfg: dict, kalshi_client=None) -> tuple:
+def can_enter(ticker: str, cfg: dict, kalshi_client=None, candidate: dict = None) -> tuple:
     if kill_switch_on():
         return False, "kill_switch_ON"
     existing = position_for(ticker)
@@ -133,6 +149,13 @@ def can_enter(ticker: str, cfg: dict, kalshi_client=None) -> tuple:
         return False, f"already_open:{ticker}"
     if resting_order_for(ticker):
         return False, f"resting_order_exists:{ticker}"
+
+    # Block if same city + target_date already has an open position
+    if candidate:
+        city = candidate.get("city", "")
+        target_date = candidate.get("target_date", "")
+        if city_date_open(city, target_date):
+            return False, f"city_date_cap:{city}:{target_date}"
 
     # Always use live Kalshi count to prevent position cap bypass across restarts
     if kalshi_client:
@@ -151,7 +174,6 @@ def obs_filter_check(candidate: dict) -> tuple:
     Block same-day HIGHTEMP YES entries when current obs shows:
       - BKN or OVC cloud layer at or below 3000 ft AGL, OR
       - temp/dewpoint spread <= 3F
-    Returns (True, reason) if BLOCKED, (False, '') if clear.
     """
     if candidate.get("variable") != "HIGHTEMP":
         return False, ""
@@ -211,8 +233,8 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
         log_event("WARN", "cooldown", f"SKIP {ticker} {side} — {reason}")
         return {"success": False, "reason": reason}
 
-    # Pass kalshi_client so can_enter() uses live position count
-    ok, reason = can_enter(ticker, cfg, kalshi_client=kalshi_client)
+    # Pass kalshi_client and candidate so can_enter() uses live count + city/date cap
+    ok, reason = can_enter(ticker, cfg, kalshi_client=kalshi_client, candidate=candidate)
     if not ok:
         log_event("INFO", "executor", f"SKIP {ticker} — {reason}")
         return {"success": False, "reason": reason}
@@ -273,10 +295,7 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
 
 
 def cancel_stale_orders(kalshi_client, cfg: dict):
-    """Cancel resting orders older than cancel_after_seconds.
-    On 400/404 (order already gone on Kalshi side), mark as 'expired' and stop retrying.
-    On 5xx or network errors, leave as 'resting' to retry next cycle.
-    """
+    """Cancel resting orders older than cancel_after_seconds."""
     max_age = cfg["risk"].get("cancel_after_seconds", 120)
     with conn() as c:
         stale = c.execute(
@@ -299,7 +318,6 @@ def cancel_stale_orders(kalshi_client, cfg: dict):
                       f"Cancelled stale order {row['order_id']} {row['ticker']}")
         except Exception as e:
             err = str(e)
-            # 400/404 = order no longer exists on Kalshi — stop retrying
             if "400" in err or "404" in err or "not found" in err.lower() or "does not exist" in err.lower():
                 with conn() as c:
                     c.execute(
@@ -309,6 +327,5 @@ def cancel_stale_orders(kalshi_client, cfg: dict):
                 log_event("INFO", "executor",
                           f"Order {row['order_id']} already gone on Kalshi — marked expired")
             else:
-                # 5xx or network error — log but leave as resting to retry
                 log_event("ERROR", "executor",
                           f"cancel_order failed {row['order_id']}: {err[:120]}")
