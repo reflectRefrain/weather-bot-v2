@@ -7,7 +7,9 @@ Manages PAPER and LIVE positions.
 - Closes positions when TP or SL is hit.
 - Writes realized PnL.
 - close_settled_positions(): detects Kalshi-settled markets and records final PnL.
-  Also force-expires any position whose target date is strictly in the past.
+  Uses fills API for accurate payout; falls back to market result field.
+- force_expire_past_positions(): only fires when target date is 2+ days old
+  (contracts settle the MORNING AFTER their target date, not at midnight).
 """
 
 import re
@@ -26,6 +28,11 @@ MONTHS = {m: i + 1 for i, m in enumerate(
     ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
 )}
 RE_TICKER_DATE = re.compile(r"-(\d{2})([A-Z]{3})(\d{2})-")
+
+# Kalshi NWS settlement happens the MORNING after the target date.
+# Give it until noon UTC (7 AM ET) the following day before force-expiring.
+# Only force-expire if the target date is >= FORCE_EXPIRE_DAYS_OLD days ago.
+FORCE_EXPIRE_DAYS_OLD = 2
 
 
 def nowiso():
@@ -65,23 +72,15 @@ def cents(v):
 
 
 def extract_prices(market):
-    yb = cents(market.get("yes_bid"))
-    ya = cents(market.get("yes_ask"))
-    nb = cents(market.get("no_bid"))
-    na = cents(market.get("no_ask"))
-    last = cents(market.get("last_price"))
-
-    if yb is None: yb = cents(market.get("yes_bid_dollars"))
-    if ya is None: ya = cents(market.get("yes_ask_dollars"))
-    if nb is None: nb = cents(market.get("no_bid_dollars"))
-    if na is None: na = cents(market.get("no_ask_dollars"))
-    if last is None: last = cents(market.get("last_price_dollars"))
-
+    yb   = cents(market.get("yes_bid"))   or cents(market.get("yes_bid_dollars"))
+    ya   = cents(market.get("yes_ask"))   or cents(market.get("yes_ask_dollars"))
+    nb   = cents(market.get("no_bid"))    or cents(market.get("no_bid_dollars"))
+    na   = cents(market.get("no_ask"))    or cents(market.get("no_ask_dollars"))
+    last = cents(market.get("last_price")) or cents(market.get("last_price_dollars"))
     if yb is None and na is not None: yb = 100 - na
     if ya is None and nb is not None: ya = 100 - nb
     if nb is None and ya is not None: nb = 100 - ya
     if na is None and yb is not None: na = 100 - yb
-
     return yb, ya, nb, na, last
 
 
@@ -217,19 +216,20 @@ def decision_for_position(row, exit_price_cents):
 
 
 def force_expire_past_positions() -> list:
-    """Force-close any OPEN position whose ticker target date is strictly before today.
+    """Force-close OPEN positions whose ticker date is FORCE_EXPIRE_DAYS_OLD or more days ago.
 
-    These contracts are 100% settled — Kalshi will never update them again.
-    We can't know the win/loss without the fills API, so we record exit as None
-    and reason as EXPIRED so they don't block the position cap.
+    Kalshi NWS contracts settle the MORNING after the target date (around 9 AM ET).
+    We wait 2 full days before force-expiring so the settlement checker always
+    gets a chance to fire first and record accurate PnL.
     """
-    today = dt.date.today()
+    today   = dt.date.today()
+    cutoff  = today - dt.timedelta(days=FORCE_EXPIRE_DAYS_OLD)
     results = []
-    rows = open_positions()
+    rows    = open_positions()
     for row in rows:
         ticker = row["ticker"]
         tdate  = target_date_from_ticker(ticker)
-        if tdate is None or tdate >= today:
+        if tdate is None or tdate > cutoff:
             continue
         with conn() as c:
             c.execute(
@@ -238,18 +238,45 @@ def force_expire_past_positions() -> list:
                 (ticker,),
             )
         log_event("WARN", "position_manager",
-                  f"FORCE_EXPIRED {ticker} — target_date={tdate} is before today={today}")
-        results.append({"ticker": ticker, "action": "FORCE_EXPIRED", "target_date": str(tdate)})
+                  f"FORCE_EXPIRED {ticker} — target_date={tdate} cutoff={cutoff}")
+        results.append({"ticker": ticker, "action": "FORCE_EXPIRED",
+                        "target_date": str(tdate)})
     return results
+
+
+def _get_fills_payout(kalshi_client, ticker: str, side: str) -> int | None:
+    """Check Kalshi fills/settlements API for a payout on a settled ticker.
+    Returns 100 (win) or 0 (loss) in cents, or None if not found.
+    """
+    try:
+        # Try portfolio settlements endpoint first
+        resp = kalshi_client.get_fills(ticker=ticker)
+        fills = resp.get("fills", []) or []
+        for f in fills:
+            action = (f.get("action") or "").lower()
+            if action in ("settlement", "payout", "settle"):
+                count = int(f.get("count", 0) or 0)
+                if count == 0:
+                    continue
+                # revenue = total payout in cents
+                revenue = f.get("yes_price") or f.get("no_price") or f.get("price")
+                if revenue is not None:
+                    p = cents(revenue)
+                    if p is not None:
+                        return p
+    except Exception:
+        pass
+    return None
 
 
 def close_settled_positions(kalshi_client) -> list:
     """Detect Kalshi-settled markets and record final PnL.
 
-    For OPEN same-day or future positions:
-      1. Call get_market to check status + result fields.
-      2. If settled: payout = 100c (winner) or 0c (loser).
-      3. Write to pnl table and mark CLOSED.
+    For each OPEN position whose target date <= today:
+      1. Check get_market for status + result.
+      2. If settled with a yes/no result: payout = 100c (win) or 0c (loss).
+      3. Optionally cross-check fills API for accurate payout cents.
+      4. Write to pnl table and mark CLOSED.
     """
     results = []
     today   = dt.date.today()
@@ -275,12 +302,16 @@ def close_settled_positions(kalshi_client) -> list:
                       f"settlement check failed {ticker}: {str(e)[:120]}")
             continue
 
-        settled_statuses = {"settled", "finalized", "resolved", "closed"}
+        settled_statuses = {"settled", "finalized", "resolved", "closed", "determined"}
         if status not in settled_statuses:
+            # Log once per cycle so we can see Kalshi's actual status string
+            log_event("DEBUG", "position_manager",
+                      f"settlement pending {ticker}: status='{status}' result='{result}'")
             continue
         if result not in ("yes", "no"):
             continue
 
+        # Determine payout — binary contracts pay $1 to winner, $0 to loser
         exit_cents = 100 if result == side else 0
         outcome    = "WIN" if result == side else "LOSS"
         realized   = (exit_cents - entry) * qty / 100.0
@@ -321,13 +352,13 @@ def manage_positions(kalshi_client=None, dry_run=True):
     if kalshi_client is None:
         kalshi_client = KalshiClient()
 
-    # 1. Force-expire any position whose date is strictly in the past
-    expired = force_expire_past_positions()
-    results = list(expired)
-
-    # 2. Close any today contracts that Kalshi has already settled
+    # 1. Close any contracts Kalshi has already settled (writes real PnL)
     settlements = close_settled_positions(kalshi_client)
-    results.extend(settlements)
+    results     = list(settlements)
+
+    # 2. Force-expire anything 2+ days old that settlement checker missed
+    expired = force_expire_past_positions()
+    results.extend(expired)
 
     # 3. Manage still-open positions with TP/SL bands
     rows = open_positions()
