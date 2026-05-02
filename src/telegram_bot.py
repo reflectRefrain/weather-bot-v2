@@ -5,8 +5,10 @@ Runs as async task inside the main thread’s event loop.
 Commands:
   /help       — command list
   /status     — bot health + balance
+  /balance    — quick balance check
   /positions  — open positions
   /pnl        — today’s PnL
+  /pnl7       — last 7 days PnL
   /summary    — full daily summary
   /pause      — stop trading
   /resume     — resume trading
@@ -38,6 +40,25 @@ def only_owner(func):
 # Formatters
 # ──────────────────────────────────────────────────
 
+def fmt_balance() -> str:
+    try:
+        from kalshi_client import KalshiClient
+        resp      = KalshiClient().balance()
+        free      = resp.get("balance", 0) / 100.0
+        portfolio = resp.get("portfolio_value", 0) / 100.0
+        total     = free + portfolio
+        n_pos     = len(open_positions())
+        return (
+            f"💵 Balance\n"
+            f"Free cash : ${free:.2f}\n"
+            f"Portfolio : ${portfolio:.2f}\n"
+            f"Total     : ${total:.2f}\n"
+            f"Positions : {n_pos} open"
+        )
+    except Exception as e:
+        return f"Could not fetch balance: {e}"
+
+
 def fmt_positions() -> str:
     rows = open_positions()
     if not rows:
@@ -52,63 +73,48 @@ def fmt_positions() -> str:
     return "\n".join(lines)
 
 
-def fmt_status(kalshi_client=None) -> str:
+def fmt_status() -> str:
     kill  = kill_switch_on()
     mode  = get_state("mode") or "paper"
     n_pos = len(open_positions())
-    balance_str = ""
-    if kalshi_client:
-        try:
-            resp      = kalshi_client.balance()
-            free      = resp.get("balance", 0) / 100.0
-            portfolio = resp.get("portfolio_value", 0) / 100.0
-            balance_str = f"\nFree cash : ${free:.2f}\nPortfolio : ${portfolio:.2f}\nTotal     : ${free+portfolio:.2f}"
-        except Exception:
-            pass
     return (
         f"Weather Bot v3\n"
         f"Status    : {'🔴 PAUSED' if kill else '🟢 RUNNING'}\n"
         f"Mode      : {'📄 PAPER' if mode == 'paper' else '💰 LIVE'}\n"
         f"Positions : {n_pos} open\n"
         f"Time      : {dt.datetime.utcnow().strftime('%H:%M UTC')}"
-        f"{balance_str}"
     )
 
 
 def fmt_pnl(days: int = 1) -> str:
-    """Return PnL summary for the last N days."""
     since = (dt.date.today() - dt.timedelta(days=days - 1)).isoformat()
     with conn() as c:
         rows = c.execute(
-            "SELECT ticker, side, qty, entry_cents, exit_cents, realized_usd, reason "
-            "FROM pnl WHERE date(closed_at) >= ? ORDER BY closed_at DESC",
+            "SELECT ticker, side, realized_usd FROM pnl "
+            "WHERE date(closed_at) >= ? ORDER BY closed_at DESC",
             (since,),
         ).fetchall()
     if not rows:
         return f"No settled trades in the last {days} day(s)."
     total    = sum(r["realized_usd"] for r in rows)
     wins     = sum(1 for r in rows if r["realized_usd"] > 0)
-    losses   = sum(1 for r in rows if r["realized_usd"] <= 0)
-    win_rate = wins / len(rows) * 100 if rows else 0
+    losses   = len(rows) - wins
+    win_rate = wins / len(rows) * 100
     lines    = [
         f"PnL — last {days} day(s)",
         f"Trades : {len(rows)} ({wins}W / {losses}L  {win_rate:.0f}%)",
         f"Total  : ${total:+.2f}",
         "",
     ]
-    for r in rows[:10]:  # cap at 10 lines
-        outcome = "✅" if r["realized_usd"] > 0 else "❌"
-        lines.append(
-            f"{outcome} {r['ticker'][-20:]} {r['side'].upper()} "
-            f"${r['realized_usd']:+.2f}"
-        )
+    for r in rows[:10]:
+        icon = "✅" if r["realized_usd"] > 0 else "❌"
+        lines.append(f"{icon} {r['ticker'][-20:]} {r['side'].upper()} ${r['realized_usd']:+.2f}")
     if len(rows) > 10:
         lines.append(f"... and {len(rows)-10} more")
     return "\n".join(lines)
 
 
 def fmt_daily_summary(kalshi_client=None) -> str:
-    """Full daily summary — sent automatically every morning."""
     today = dt.date.today().isoformat()
     with conn() as c:
         pnl_rows = c.execute(
@@ -156,7 +162,8 @@ def fmt_daily_summary(kalshi_client=None) -> str:
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Weather Bot v3 Commands:\n"
-        "/status    — health + balance\n"
+        "/balance   — quick balance check\n"
+        "/status    — bot health\n"
         "/positions — open positions\n"
         "/pnl       — today’s PnL\n"
         "/pnl7      — last 7 days PnL\n"
@@ -168,6 +175,11 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/setlive   — switch to live\n"
         "/help      — this message"
     )
+
+
+@only_owner
+async def cmd_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(fmt_balance())
 
 
 @only_owner
@@ -229,7 +241,6 @@ async def cmd_setlive(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ──────────────────────────────────────────────────
 
 async def notify(text: str):
-    """Async send — await from the main async loop."""
     if not TOKEN or not CHAT_ID:
         return
     try:
@@ -240,7 +251,6 @@ async def notify(text: str):
 
 
 def notify_sync(text: str):
-    """Sync wrapper for non-async callers."""
     try:
         asyncio.run(notify(text))
     except Exception:
@@ -248,10 +258,10 @@ def notify_sync(text: str):
 
 
 async def run_bot_async():
-    """Run Telegram polling as a proper async task."""
     init_db()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("help",      cmd_help))
+    app.add_handler(CommandHandler("balance",   cmd_balance))
     app.add_handler(CommandHandler("status",    cmd_status))
     app.add_handler(CommandHandler("positions", cmd_positions))
     app.add_handler(CommandHandler("pnl",       cmd_pnl))
