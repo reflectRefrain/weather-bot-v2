@@ -2,7 +2,7 @@
 Executor — places and cancels orders with full risk guards.
 RULES ENFORCED HERE:
   1. Never enter same ticker twice (no accumulation bug)
-  2. Hard position cap
+  2. Hard position cap (checked against LIVE Kalshi positions, not just local DB)
   3. Hard per-ticker dollar cap
   4. Daily loss limit auto-kill
   5. Min balance guard
@@ -13,7 +13,7 @@ RULES ENFORCED HERE:
 """
 import datetime as dt, math, yaml, os
 from db import conn, init_db
-from reconcile import position_for, open_positions
+from reconcile import position_for, open_positions, sync_from_kalshi
 from cooldown import is_blocked
 
 CONFIG_PATH = os.getenv("CONFIG_PATH", "/app/config.yaml")
@@ -114,7 +114,18 @@ def resting_order_for(ticker: str) -> bool:
     return row is not None
 
 
-def can_enter(ticker: str, cfg: dict) -> tuple:
+def live_open_position_count(kalshi_client) -> int:
+    """Query Kalshi API directly for the number of currently open positions.
+    Falls back to local DB count if the API call fails.
+    """
+    try:
+        sync_from_kalshi(kalshi_client)
+    except Exception as e:
+        log_event("WARN", "executor", f"live_open_position_count sync failed: {e}")
+    return len(open_positions())
+
+
+def can_enter(ticker: str, cfg: dict, kalshi_client=None) -> tuple:
     if kill_switch_on():
         return False, "kill_switch_ON"
     existing = position_for(ticker)
@@ -122,10 +133,16 @@ def can_enter(ticker: str, cfg: dict) -> tuple:
         return False, f"already_open:{ticker}"
     if resting_order_for(ticker):
         return False, f"resting_order_exists:{ticker}"
-    open_pos = open_positions()
+
+    # Always use live Kalshi count to prevent position cap bypass across restarts
+    if kalshi_client:
+        open_count = live_open_position_count(kalshi_client)
+    else:
+        open_count = len(open_positions())
+
     max_pos = cfg["risk"]["max_open_positions"]
-    if len(open_pos) >= max_pos:
-        return False, f"position_cap:{len(open_pos)}/{max_pos}"
+    if open_count >= max_pos:
+        return False, f"position_cap:{open_count}/{max_pos}"
     return True, ""
 
 
@@ -194,7 +211,8 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
         log_event("WARN", "cooldown", f"SKIP {ticker} {side} — {reason}")
         return {"success": False, "reason": reason}
 
-    ok, reason = can_enter(ticker, cfg)
+    # Pass kalshi_client so can_enter() uses live position count
+    ok, reason = can_enter(ticker, cfg, kalshi_client=kalshi_client)
     if not ok:
         log_event("INFO", "executor", f"SKIP {ticker} — {reason}")
         return {"success": False, "reason": reason}
