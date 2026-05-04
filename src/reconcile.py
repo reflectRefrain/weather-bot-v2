@@ -25,11 +25,22 @@ def open_positions() -> list:
     return [dict(r) for r in rows]
 
 
-def _already_in_pnl(ticker: str) -> bool:
-    """Return True if this ticker already has a pnl entry (avoid double-writes)."""
+def _already_in_pnl(ticker: str, today: str) -> bool:
+    """
+    Return True if this ticker already has a FINALIZED pnl entry for today.
+    Scoped to today so the same ticker can trade again on a future day.
+    settlement_pending entries do NOT count — they will be retried.
+    """
     with conn() as c:
         row = c.execute(
-            "SELECT 1 FROM pnl WHERE ticker=? LIMIT 1", (ticker,)
+            """
+            SELECT 1 FROM pnl
+            WHERE ticker = ?
+              AND date(closed_at) = ?
+              AND reason != 'settlement_pending'
+            LIMIT 1
+            """,
+            (ticker, today),
         ).fetchone()
     return row is not None
 
@@ -37,10 +48,16 @@ def _already_in_pnl(ticker: str) -> bool:
 def _write_settlement_pnl(ticker: str, side: str, qty: int,
                           entry_cents: int, exit_cents: int,
                           reason: str = "settlement"):
-    """Write a Kalshi-settled position to the pnl table."""
+    """Write (or overwrite) a Kalshi-settled position to the pnl table."""
     realized = round((exit_cents - entry_cents) * qty / 100.0, 4)
     now = dt.datetime.utcnow().isoformat()
+    today = dt.date.today().isoformat()
     with conn() as c:
+        # Remove any stale settlement_pending entry for today before inserting
+        c.execute(
+            "DELETE FROM pnl WHERE ticker=? AND date(closed_at)=? AND reason='settlement_pending'",
+            (ticker, today),
+        )
         c.execute(
             """
             INSERT OR IGNORE INTO pnl
@@ -83,7 +100,6 @@ def _get_settlement_price(k, ticker: str, side: str) -> int | None:
         status = (m.get("status") or "").lower()
         result = m.get("result") or m.get("yes_sub_title") or ""
         if status in ("finalized", "settled", "resolved"):
-            # result is usually 'yes' or 'no'
             if isinstance(result, str):
                 if result.lower() == "yes":
                     return 100 if side == "yes" else 0
@@ -95,6 +111,15 @@ def _get_settlement_price(k, ticker: str, side: str) -> int | None:
     return None
 
 
+def _pending_settlements() -> list:
+    """Return pnl rows that were written as settlement_pending and need a retry."""
+    with conn() as c:
+        rows = c.execute(
+            "SELECT * FROM pnl WHERE reason='settlement_pending'"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def sync_from_kalshi(k):
     try:
         resp = k.positions(limit=200)
@@ -102,7 +127,8 @@ def sync_from_kalshi(k):
         return {"error": str(e)}
     positions = resp.get("market_positions", []) or []
     now = dt.datetime.utcnow().isoformat()
-    kept = cleared = settled_written = 0
+    today = dt.date.today().isoformat()
+    kept = cleared = settled_written = pending_retried = 0
 
     # Snapshot open positions BEFORE marking stale (needed for settlement write)
     with conn() as c:
@@ -153,9 +179,9 @@ def sync_from_kalshi(k):
         for row in just_closed:
             ticker = row["ticker"]
             if ticker not in pre_open:
-                continue  # wasn't open before, skip
-            if _already_in_pnl(ticker):
-                continue  # already recorded
+                continue
+            if _already_in_pnl(ticker, today):
+                continue
             pos = pre_open[ticker]
             entry_cents = int(pos.get("avg_price_cents") or 0)
             side = pos.get("side", "yes")
@@ -164,8 +190,7 @@ def sync_from_kalshi(k):
                 continue
             exit_cents = _get_settlement_price(k, ticker, side)
             if exit_cents is None:
-                # Can't determine outcome yet — write as pending with exit=0
-                # Will show as a loss until we get the real price
+                # Can't determine outcome yet — write as pending, will retry next cycle
                 exit_cents = 0
                 reason = "settlement_pending"
             else:
@@ -173,7 +198,23 @@ def sync_from_kalshi(k):
             _write_settlement_pnl(ticker, side, qty, entry_cents, exit_cents, reason)
             settled_written += 1
 
-    return {"synced": kept, "cleared": cleared, "settled_written": settled_written}
+    # Retry any previously pending settlements
+    for pending in _pending_settlements():
+        ticker = pending["ticker"]
+        side = pending["side"]
+        qty = int(pending["qty"])
+        entry_cents = int(pending["entry_cents"])
+        exit_cents = _get_settlement_price(k, ticker, side)
+        if exit_cents is not None:
+            _write_settlement_pnl(ticker, side, qty, entry_cents, exit_cents, "settlement")
+            pending_retried += 1
+
+    return {
+        "synced": kept,
+        "cleared": cleared,
+        "settled_written": settled_written,
+        "pending_retried": pending_retried,
+    }
 
 
 # Alias expected by main.py
