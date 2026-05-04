@@ -14,7 +14,7 @@ bankroll_usd: 200.00
 risk:
   daily_loss_limit_pct: 0.06       # Kill bot if down 6% in one day (~$12.00)
   max_open_positions: 5            # Max concurrent open positions
-  min_edge_cents: 8                # Min model edge over market mid (cents)
+  min_edge_cents: 6                # Min model edge over market mid (cents)
   max_spread_cents: 15             # Skip markets with spread wider than this
   min_entry_cents: 20              # Skip cheap low-conviction contracts
   max_entry_cents: 90              # Don't buy contracts more expensive than 90c

@@ -4,7 +4,7 @@ RULES ENFORCED HERE:
   1. Never enter same ticker twice (no accumulation bug)
   2. Hard position cap (checked against LIVE Kalshi positions, not just local DB)
   3. Hard per-ticker dollar cap
-  4. Daily loss limit auto-kill
+  4. Daily loss limit auto-kill (based on free cash only, not portfolio value)
   5. Min balance guard
   6. Kill switch check before every order
   7. Cancel stale resting orders automatically (mark expired on 400/404, stop retrying)
@@ -71,6 +71,14 @@ def set_kill_switch(on: bool):
     )
 
 
+def free_cash_usd(kalshi_client) -> float:
+    """Return free (uninvested) cash only — not portfolio value.
+    Daily loss limit is based on free cash so open winning positions
+    don't create a false 'loss' reading."""
+    resp = kalshi_client.balance()
+    return resp.get("balance", 0) / 100.0
+
+
 def total_balance_usd(kalshi_client) -> float:
     resp = kalshi_client.balance()
     free_cash = resp.get("balance", 0) / 100.0
@@ -80,21 +88,24 @@ def total_balance_usd(kalshi_client) -> float:
 
 def daily_loss_check(kalshi_client, cfg) -> bool:
     try:
-        balance = total_balance_usd(kalshi_client)
-        day_start = float(get_state("day_start_balance") or balance)
-        loss = day_start - balance
+        # Use free cash only for loss tracking.
+        # Portfolio value fluctuates with open positions and would
+        # incorrectly trigger the kill switch when the bot is winning.
+        free_cash = free_cash_usd(kalshi_client)
+        day_start = float(get_state("day_start_balance") or free_cash)
+        loss = day_start - free_cash
         limit = cfg["bankroll_usd"] * cfg["risk"]["daily_loss_limit_pct"]
         log_event("INFO", "executor",
-                  f"Daily loss check: start=${day_start:.2f} now=${balance:.2f} loss=${loss:.2f} limit=${limit:.2f}")
+                  f"Daily loss check: start=${day_start:.2f} free=${free_cash:.2f} loss=${loss:.2f} limit=${limit:.2f}")
         if loss >= limit:
             log_event("WARN", "executor",
                       f"Daily loss limit hit: lost ${loss:.2f} vs limit ${limit:.2f}")
             set_kill_switch(True)
             return True
         min_bal = cfg["risk"]["min_balance_usd"]
-        if balance < min_bal:
+        if free_cash < min_bal:
             log_event("WARN", "executor",
-                      f"Balance ${balance:.2f} below minimum ${min_bal:.2f}")
+                      f"Free cash ${free_cash:.2f} below minimum ${min_bal:.2f}")
             set_kill_switch(True)
             return True
     except Exception as e:
@@ -208,7 +219,7 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
         float(cfg["risk"].get("max_trade_usd", 2.0)),
         float(cfg["risk"].get("max_per_ticker_usd", 2.0)),
     )
-    kelly_usd = max(kelly_usd, float(cfg["risk"].get("min_trade_usd", 1.0)))
+    kelly_usd = max(kelly_usd, float(cfg["risk"].get("min_trade_usd", 1.00)))
 
     # Obs filter
     blocked_by_obs, obs_reason = obs_filter_check(candidate)
@@ -231,7 +242,6 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
         return {"success": False, "reason": "daily_loss_limit"}
 
     # Qty calculation with hard contract cap
-    # Cap prevents oversizing on cheap contracts (e.g. 22c entry = 27 contracts without cap)
     max_contracts = int(cfg["risk"].get("max_contracts", 15))
     qty = max(1, math.floor((kelly_usd * 100) / price_c))
     qty = min(qty, max_contracts)
