@@ -57,14 +57,21 @@ class KalshiClient:
                 time.sleep(2)
         raise RuntimeError(f"Kalshi {method} {path} failed after {retries} retries")
 
-    # ── Account ──────────────────────────────────────────
+    # ── Account ────────────────────────────────────────────────────
     def balance(self):
         return self._request("GET", "/portfolio/balance")
 
     def positions(self, limit=200):
         return self._request("GET", "/portfolio/positions", params={"limit": limit})
 
-    # ── Markets ───────────────────────────────────────────
+    def fills(self, ticker=None, limit=100):
+        """Get portfolio fills (trade history). Used by settlement reconciler."""
+        params = {"limit": limit}
+        if ticker:
+            params["ticker"] = ticker
+        return self._request("GET", "/portfolio/fills", params=params)
+
+    # ── Markets ───────────────────────────────────────────────────
     def get_markets(self, series_ticker=None, status="open", cursor=None, limit=200):
         params = {"status": status, "limit": limit}
         if series_ticker: params["series_ticker"] = series_ticker
@@ -74,7 +81,7 @@ class KalshiClient:
     def get_market(self, ticker):
         return self._request("GET", f"/markets/{ticker}")
 
-    # ── Orders ────────────────────────────────────────────
+    # ── Orders ────────────────────────────────────────────────────
     def create_order(self, ticker, side, action, count,
                      type_="limit", yes_price=None, no_price=None,
                      client_order_id=None):
