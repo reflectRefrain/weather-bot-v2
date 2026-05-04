@@ -2,7 +2,7 @@
 Telegram bot — phone command center.
 Runs as async task inside the main thread's event loop.
 """
-import os, asyncio, datetime as dt
+import os, asyncio, datetime as dt, subprocess
 from telegram import Update, Bot, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
 from db import init_db, conn
@@ -12,21 +12,28 @@ from reconcile import open_positions
 TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID", "0"))
 
+# Project root on the host — used by /pullbot and /rebuildbot
+PROJECT_DIR = os.getenv("PROJECT_DIR", "/root/weather-bot-v2")
+
 SEP = "─" * 22
 
 # Commands registered with Telegram (shows in the / menu)
 BOT_COMMANDS = [
-    BotCommand("status",    "Bot health & current mode"),
-    BotCommand("positions", "Open positions + max win/loss"),
-    BotCommand("pnl",       "Today's realized PnL"),
-    BotCommand("balance",   "Live Kalshi balance"),
-    BotCommand("strategy",  "How the bot works right now"),
-    BotCommand("pause",     "Stop trading (kill switch ON)"),
-    BotCommand("resume",    "Resume trading (kill switch OFF)"),
-    BotCommand("mode",      "Show current mode (paper/live)"),
-    BotCommand("setpaper",  "Switch to paper mode"),
-    BotCommand("setlive",   "Switch to live mode"),
-    BotCommand("help",      "Show all commands"),
+    BotCommand("status",      "Bot health & current mode"),
+    BotCommand("positions",   "Open positions + max win/loss"),
+    BotCommand("pnl",         "Today's realized PnL"),
+    BotCommand("balance",     "Live Kalshi balance"),
+    BotCommand("strategy",    "How the bot works right now"),
+    BotCommand("pause",       "Stop trading (kill switch ON)"),
+    BotCommand("resume",      "Resume trading (kill switch OFF)"),
+    BotCommand("mode",        "Show current mode (paper/live)"),
+    BotCommand("setpaper",    "Switch to paper mode"),
+    BotCommand("setlive",     "Switch to live mode"),
+    BotCommand("botlogs",     "Last 30 log lines"),
+    BotCommand("restartbot",  "docker compose restart (no rebuild)"),
+    BotCommand("rebuildbot",  "docker compose up -d --build"),
+    BotCommand("pullbot",     "git pull + rebuild (deploy latest code)"),
+    BotCommand("help",        "Show all commands"),
 ]
 
 
@@ -277,17 +284,23 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Weather Bot v2 Commands\n"
         f"{SEP}\n"
-        "/status    — bot health & mode\n"
-        "/positions — open positions + max win/loss\n"
-        "/pnl       — today's realized PnL\n"
-        "/balance   — live Kalshi balance\n"
-        "/strategy  — how the bot works\n"
-        "/pause     — stop trading\n"
-        "/resume    — resume trading\n"
-        "/setpaper  — switch to paper mode\n"
-        "/setlive   — switch to live mode\n"
-        "/mode      — current mode\n"
-        "/help      — this message"
+        "/status      — bot health & mode\n"
+        "/positions   — open positions\n"
+        "/pnl         — today's realized PnL\n"
+        "/balance     — live Kalshi balance\n"
+        "/strategy    — how the bot works\n"
+        "/pause       — stop trading\n"
+        "/resume      — resume trading\n"
+        "/setpaper    — switch to paper mode\n"
+        "/setlive     — switch to live mode\n"
+        "/mode        — current mode\n"
+        f"{SEP}\n"
+        "🛠 Admin\n"
+        "/botlogs     — last 30 log lines\n"
+        "/restartbot  — restart container (no rebuild)\n"
+        "/rebuildbot  — rebuild + restart container\n"
+        "/pullbot     — git pull + rebuild (deploy latest)\n"
+        "/help        — this message"
     )
 
 
@@ -345,6 +358,58 @@ async def cmd_setlive(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("💰 Switched to LIVE mode.")
 
 
+# ── Admin shell commands ───────────────────────────────────────────────
+# These run shell commands on the HOST via subprocess.
+# Only /pullbot, /rebuildbot, /restartbot, /botlogs are allowed.
+# No arbitrary shell execution — fixed commands only.
+
+def _run_shell(cmd: str, timeout: int = 60) -> str:
+    """Run a shell command and return stdout+stderr, truncated to 3800 chars."""
+    try:
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=timeout
+        )
+        out = (result.stdout + result.stderr).strip()
+        if len(out) > 3800:
+            out = "..." + out[-3800:]
+        return out or "(no output)"
+    except subprocess.TimeoutExpired:
+        return f"Command timed out after {timeout}s"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@only_owner
+async def cmd_botlogs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📥 Fetching last 30 log lines...")
+    out = _run_shell("docker logs wb2-trader --tail 30 2>&1")
+    await update.message.reply_text(f"📝 Logs:\n{SEP}\n{out}")
+
+
+@only_owner
+async def cmd_restartbot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔄 Restarting container (no rebuild)...")
+    out = _run_shell(f"cd {PROJECT_DIR} && docker compose restart", timeout=30)
+    await update.message.reply_text(f"Done:\n{out}")
+
+
+@only_owner
+async def cmd_rebuildbot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔨 Rebuilding + restarting... (this takes ~30s)")
+    out = _run_shell(f"cd {PROJECT_DIR} && docker compose up -d --build 2>&1", timeout=120)
+    await update.message.reply_text(f"Done:\n{out}")
+
+
+@only_owner
+async def cmd_pullbot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📦 Pulling latest code + rebuilding... (this takes ~60s)")
+    out = _run_shell(
+        f"cd {PROJECT_DIR} && git pull 2>&1 && docker compose up -d --build 2>&1",
+        timeout=180
+    )
+    await update.message.reply_text(f"Done:\n{out}")
+
+
 # ──────────────────────────────────────────────────────────────────
 # Notify helpers
 # ──────────────────────────────────────────────────────────────────
@@ -377,17 +442,21 @@ async def send_daily_summary():
 async def run_bot_async():
     init_db()
     app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("help",      cmd_help))
-    app.add_handler(CommandHandler("status",    cmd_status))
-    app.add_handler(CommandHandler("positions", cmd_positions))
-    app.add_handler(CommandHandler("pnl",       cmd_pnl))
-    app.add_handler(CommandHandler("balance",   cmd_balance))
-    app.add_handler(CommandHandler("strategy",  cmd_strategy))
-    app.add_handler(CommandHandler("pause",     cmd_pause))
-    app.add_handler(CommandHandler("resume",    cmd_resume))
-    app.add_handler(CommandHandler("mode",      cmd_mode))
-    app.add_handler(CommandHandler("setpaper",  cmd_setpaper))
-    app.add_handler(CommandHandler("setlive",   cmd_setlive))
+    app.add_handler(CommandHandler("help",        cmd_help))
+    app.add_handler(CommandHandler("status",      cmd_status))
+    app.add_handler(CommandHandler("positions",   cmd_positions))
+    app.add_handler(CommandHandler("pnl",         cmd_pnl))
+    app.add_handler(CommandHandler("balance",     cmd_balance))
+    app.add_handler(CommandHandler("strategy",    cmd_strategy))
+    app.add_handler(CommandHandler("pause",       cmd_pause))
+    app.add_handler(CommandHandler("resume",      cmd_resume))
+    app.add_handler(CommandHandler("mode",        cmd_mode))
+    app.add_handler(CommandHandler("setpaper",    cmd_setpaper))
+    app.add_handler(CommandHandler("setlive",     cmd_setlive))
+    app.add_handler(CommandHandler("botlogs",     cmd_botlogs))
+    app.add_handler(CommandHandler("restartbot",  cmd_restartbot))
+    app.add_handler(CommandHandler("rebuildbot",  cmd_rebuildbot))
+    app.add_handler(CommandHandler("pullbot",     cmd_pullbot))
 
     # Register command menu so the / list in Telegram stays current
     async with Bot(TOKEN) as bot:
