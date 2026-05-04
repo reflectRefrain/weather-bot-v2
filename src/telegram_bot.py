@@ -12,8 +12,8 @@ from reconcile import open_positions
 TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID", "0"))
 
-# Project root on the host — used by /pullbot and /rebuildbot
-PROJECT_DIR = os.getenv("PROJECT_DIR", "/root/weather-bot-v2")
+# Host-side project path (mounted into container at /host/weather-bot-v2)
+HOST_PROJECT_DIR = "/host/weather-bot-v2"
 
 SEP = "─" * 22
 
@@ -358,10 +358,10 @@ async def cmd_setlive(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("💰 Switched to LIVE mode.")
 
 
-# ── Admin shell commands ───────────────────────────────────────────────
-# These run shell commands on the HOST via subprocess.
-# Only /pullbot, /rebuildbot, /restartbot, /botlogs are allowed.
-# No arbitrary shell execution — fixed commands only.
+# ── Admin shell commands ───────────────────────────────────────────
+# Commands run on the HOST filesystem via the bind-mounted project dir.
+# Docker CLI calls use the mounted docker socket.
+# Only fixed allow-listed commands — no arbitrary shell execution.
 
 def _run_shell(cmd: str, timeout: int = 60) -> str:
     """Run a shell command and return stdout+stderr, truncated to 3800 chars."""
@@ -389,14 +389,14 @@ async def cmd_botlogs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 @only_owner
 async def cmd_restartbot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 Restarting container (no rebuild)...")
-    out = _run_shell(f"cd {PROJECT_DIR} && docker compose restart", timeout=30)
+    out = _run_shell(f"cd {HOST_PROJECT_DIR} && docker compose restart", timeout=30)
     await update.message.reply_text(f"Done:\n{out}")
 
 
 @only_owner
 async def cmd_rebuildbot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔨 Rebuilding + restarting... (this takes ~30s)")
-    out = _run_shell(f"cd {PROJECT_DIR} && docker compose up -d --build 2>&1", timeout=120)
+    out = _run_shell(f"cd {HOST_PROJECT_DIR} && docker compose up -d --build 2>&1", timeout=120)
     await update.message.reply_text(f"Done:\n{out}")
 
 
@@ -404,7 +404,7 @@ async def cmd_rebuildbot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_pullbot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📦 Pulling latest code + rebuilding... (this takes ~60s)")
     out = _run_shell(
-        f"cd {PROJECT_DIR} && git pull 2>&1 && docker compose up -d --build 2>&1",
+        f"cd {HOST_PROJECT_DIR} && git pull 2>&1 && docker compose up -d --build 2>&1",
         timeout=180
     )
     await update.message.reply_text(f"Done:\n{out}")
