@@ -120,9 +120,8 @@ def target_date_from_ticker(tk):
 def horizon_of(target_date_iso: str, city: str = "NYC") -> str:
     """
     Determine horizon using LOCAL date for the city, not UTC.
-    This prevents the bug where a market for 'today' in the city
-    is classified as 'same_day' at 7PM CT because UTC has rolled
-    over to the next calendar day.
+    Prevents the bug where evening trades cross midnight UTC and
+    get misclassified.
     """
     if not target_date_iso:
         return "unknown"
@@ -204,14 +203,20 @@ def fetch_single(k, ticker):
 def score_candidates(markets, noaa_client, metar_client, cfg):
     """
     Score each market against NOAA forecast + METAR obs anchor.
-    LOCK-IN STRATEGY: entry only 2PM-3PM local (obs-anchored window).
+
+    VETERAN RULES ENFORCED:
+    1. max_entry_no_cents  — never pay >75c for a NO (bad risk/reward trap)
+    2. min_reward_ratio    — profit potential must be >= 25c per $1 risked
+    3. Sizing favors cheap high-edge trades over expensive "sure things"
     """
     from model import sigma_for, time_adjusted_sigma, adjusted_forecast, yes_prob, market_mid_prob
     risk = cfg.get("risk", {})
-    min_model_prob  = float(risk.get("min_model_prob",  0.80))
-    min_edge_cents  = float(risk.get("min_edge_cents",  6))
-    min_entry_cents = float(risk.get("min_entry_cents", 20))
-    max_entry_cents = float(risk.get("max_entry_cents", 90))
+    min_model_prob      = float(risk.get("min_model_prob",    0.80))
+    min_edge_cents      = float(risk.get("min_edge_cents",    6))
+    min_entry_cents     = float(risk.get("min_entry_cents",   20))
+    max_entry_cents     = float(risk.get("max_entry_cents",   90))
+    max_entry_no_cents  = float(risk.get("max_entry_no_cents", 75))
+    min_reward_ratio    = float(risk.get("min_reward_ratio",   0.25))
 
     candidates = []
     for m in markets:
@@ -234,7 +239,7 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
         if not coords:
             continue
 
-        # Recompute horizon with local date before entry time check
+        # Recompute horizon with local date
         hz = horizon_of(m.get("target_date", ""), city)
 
         if hz not in set(cfg.get("horizons", ["same_day"])):
@@ -283,11 +288,16 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
         edge_yes = (mp - mid) * 100
         edge_no  = ((1 - mp) - (1 - mid)) * 100
 
-        # Both sides must be below threshold — if either side is high-confidence, evaluate it
         if mp < min_model_prob and (1 - mp) < min_model_prob:
             continue
 
+        # YES side
         if edge_yes >= min_edge_cents and min_entry_cents <= ya <= max_entry_cents:
+            reward_ratio = (100 - ya) / ya if ya > 0 else 0
+            if reward_ratio < min_reward_ratio:
+                log_event("INFO", "scanner",
+                          f"reward_ratio_block YES {ticker}: entry={ya}c ratio={reward_ratio:.2f} min={min_reward_ratio}")
+                continue
             candidates.append({
                 "ticker":             ticker,
                 "side":               "yes",
@@ -307,10 +317,25 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
                 "obs_f":              obs_f,
                 "sigma_used":         round(sigma, 2),
                 "price_cents":        ya,
+                "reward_ratio":       round(reward_ratio, 3),
                 "target_date":        m.get("target_date"),
             })
-        elif edge_no >= min_edge_cents and min_entry_cents <= (100 - yb) <= max_entry_cents:
+
+        # NO side
+        elif edge_no >= min_edge_cents:
             no_ask = 100 - yb
+            # Veteran rule: never buy NO above max_entry_no_cents
+            if no_ask > max_entry_no_cents:
+                log_event("INFO", "scanner",
+                          f"no_price_block {ticker}: no_ask={no_ask}c max={max_entry_no_cents}c")
+                continue
+            if not (min_entry_cents <= no_ask <= max_entry_cents):
+                continue
+            reward_ratio = (100 - no_ask) / no_ask if no_ask > 0 else 0
+            if reward_ratio < min_reward_ratio:
+                log_event("INFO", "scanner",
+                          f"reward_ratio_block NO {ticker}: entry={no_ask}c ratio={reward_ratio:.2f} min={min_reward_ratio}")
+                continue
             candidates.append({
                 "ticker":             ticker,
                 "side":               "no",
@@ -330,6 +355,7 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
                 "obs_f":              obs_f,
                 "sigma_used":         round(sigma, 2),
                 "price_cents":        no_ask,
+                "reward_ratio":       round(reward_ratio, 3),
                 "target_date":        m.get("target_date"),
             })
 
@@ -359,7 +385,6 @@ def scan_once(config_path="/app/config.yaml"):
         hits += 1
         for m in ms:
             tdate = target_date_from_ticker(m.get("ticker", ""))
-            # Use local date for horizon classification
             hz = horizon_of(tdate, our_city)
             if hz not in allowed_hz:
                 continue

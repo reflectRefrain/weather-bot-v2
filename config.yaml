@@ -18,11 +18,16 @@ risk:
   max_spread_cents: 15             # Skip markets with spread wider than this
   min_entry_cents: 20              # Skip cheap low-conviction contracts
   max_entry_cents: 90              # Don't buy contracts more expensive than 90c
+  max_entry_no_cents: 75           # VETERAN RULE: never pay more than 75c for a NO contract
+                                   # Buying NO at 80-90c risks $4 to make $0.30 — one loss wipes 8 wins
+  min_reward_ratio: 0.25           # VETERAN RULE: must stand to profit >= 25c per $1 risked
+                                   # e.g. buying at 80c = 20c profit / 80c risk = 0.25 (borderline)
+                                   # buying at 89c = 11c / 89c = 0.12 (REJECTED)
   min_model_prob: 0.80             # Lock-in strategy: only trade when model is >=80% confident
   kelly_fraction: 0.15             # Conservative Kelly fraction
   min_trade_usd: 1.00              # Minimum order size in dollars
-  max_trade_usd: 3.00              # Maximum order size per trade (lowered to prove strategy first)
-  max_per_ticker_usd: 3.00         # Hard cap per ticker (lowered to prove strategy first)
+  max_trade_usd: 3.00              # Maximum order size per trade
+  max_per_ticker_usd: 3.00         # Hard cap per ticker
   max_contracts: 15                # Hard cap on contracts per trade
   min_balance_usd: 50.00           # Pause if balance drops below this (25% drawdown)
   cancel_after_seconds: 120        # Cancel unfilled resting orders after 2 min
