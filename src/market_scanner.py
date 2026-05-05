@@ -65,12 +65,9 @@ MONTHS = {m: i + 1 for i, m in enumerate(
 )}
 
 # ── Entry time windows (local hour, inclusive) ────────────────────────────────
-# LOCK-IN STRATEGY: same_day entry starts at 2PM local — by this point METAR
-# obs have diverged enough from morning forecasts to create genuine edge.
-# Morning (8AM-2PM) is pure forecast-betting territory — avoid it.
-SAME_DAY_ENTRY_START = 14  # 2 PM local — obs-anchored lock-in window opens
-SAME_DAY_ENTRY_END   = 15  # 3 PM local — before late-day illiquidity
-NEXT_DAY_ENTRY_START = 6   # kept for reference, not used (next_day disabled in config)
+SAME_DAY_ENTRY_START = 14  # 2 PM local
+SAME_DAY_ENTRY_END   = 15  # 3 PM local
+NEXT_DAY_ENTRY_START = 6
 NEXT_DAY_ENTRY_END   = 10
 
 
@@ -120,40 +117,50 @@ def target_date_from_ticker(tk):
         return None
 
 
-def horizon_of(target_date_iso):
+def horizon_of(target_date_iso: str, city: str = "NYC") -> str:
+    """
+    Determine horizon using LOCAL date for the city, not UTC.
+    This prevents the bug where a market for 'today' in the city
+    is classified as 'same_day' at 7PM CT because UTC has rolled
+    over to the next calendar day.
+    """
     if not target_date_iso:
         return "unknown"
     try:
         td = dt.date.fromisoformat(target_date_iso)
-        today = dt.datetime.utcnow().date()
-        delta = (td - today).days
-        if delta <= 0:
+        tz = ZoneInfo(CITY_TZ.get(city, "America/Chicago"))
+        local_today = dt.datetime.now(tz).date()
+        delta = (td - local_today).days
+        if delta == 0:
             return "same_day"
         if delta == 1:
             return "next_day"
+        if delta < 0:
+            return "expired"
         return "weekly"
     except Exception:
         return "unknown"
 
 
 def is_valid_entry_time(horizon: str, city: str) -> bool:
-    """Gate entries by local time of day.
-
-    LOCK-IN STRATEGY:
-    same_day: 2PM – 3PM local only. By 2PM, METAR obs have diverged enough
-    from morning forecasts to create genuine edge. Morning entries are pure
-    forecast-betting with no obs anchor advantage.
-
-    next_day: disabled via config horizons. Window kept for reference.
-    weekly:   always allowed.
+    """
+    Gate entries by local time of day.
+    same_day: 2PM-3PM local only (obs-anchored lock-in window).
     """
     try:
         tz = ZoneInfo(CITY_TZ.get(city, "America/New_York"))
         hour = dt.datetime.now(tz).hour
         if horizon == "same_day":
-            return SAME_DAY_ENTRY_START <= hour <= SAME_DAY_ENTRY_END
+            ok = SAME_DAY_ENTRY_START <= hour <= SAME_DAY_ENTRY_END
+            if not ok:
+                log_event("INFO", "scanner",
+                          f"entry_time_block: {city} same_day local_hour={hour} "
+                          f"window={SAME_DAY_ENTRY_START}-{SAME_DAY_ENTRY_END}")
+            return ok
         if horizon == "next_day":
             return NEXT_DAY_ENTRY_START <= hour <= NEXT_DAY_ENTRY_END
+        if horizon == "expired":
+            return False
         return True
     except Exception:
         return True
@@ -195,19 +202,14 @@ def fetch_single(k, ticker):
 
 
 def score_candidates(markets, noaa_client, metar_client, cfg):
-    """Score each market against NOAA forecast + METAR obs anchor.
-
-    LOCK-IN STRATEGY:
-    - Entry only 2PM-3PM local (obs-anchored window)
-    - min_model_prob from config (default 0.80 for lock-in confidence)
-    - min/max entry cents from config
-    - time_adjusted_sigma shrinks uncertainty as day progresses
-    - adjusted_forecast anchors effective forecast to current obs
+    """
+    Score each market against NOAA forecast + METAR obs anchor.
+    LOCK-IN STRATEGY: entry only 2PM-3PM local (obs-anchored window).
     """
     from model import sigma_for, time_adjusted_sigma, adjusted_forecast, yes_prob, market_mid_prob
     risk = cfg.get("risk", {})
     min_model_prob  = float(risk.get("min_model_prob",  0.80))
-    min_edge_cents  = float(risk.get("min_edge_cents",  8))
+    min_edge_cents  = float(risk.get("min_edge_cents",  6))
     min_entry_cents = float(risk.get("min_entry_cents", 20))
     max_entry_cents = float(risk.get("max_entry_cents", 90))
 
@@ -230,6 +232,12 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
 
         coords = CITY_COORDS.get(city)
         if not coords:
+            continue
+
+        # Recompute horizon with local date before entry time check
+        hz = horizon_of(m.get("target_date", ""), city)
+
+        if hz not in set(cfg.get("horizons", ["same_day"])):
             continue
 
         if not is_valid_entry_time(hz, city):
@@ -264,17 +272,18 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
         base_sigma = sigma_for(var, hz)
         sigma      = time_adjusted_sigma(base_sigma, hz, city)
 
-        mp    = yes_prob(effective_forecast, sigma, st, lo, hi)
+        mp  = yes_prob(effective_forecast, sigma, st, lo, hi)
         if mp is None:
             continue
 
-        mid   = market_mid_prob(yb, ya)
+        mid = market_mid_prob(yb, ya)
         if mid is None:
             continue
 
         edge_yes = (mp - mid) * 100
         edge_no  = ((1 - mp) - (1 - mid)) * 100
 
+        # Both sides must be below threshold — if either side is high-confidence, evaluate it
         if mp < min_model_prob and (1 - mp) < min_model_prob:
             continue
 
@@ -350,7 +359,8 @@ def scan_once(config_path="/app/config.yaml"):
         hits += 1
         for m in ms:
             tdate = target_date_from_ticker(m.get("ticker", ""))
-            hz = horizon_of(tdate)
+            # Use local date for horizon classification
+            hz = horizon_of(tdate, our_city)
             if hz not in allowed_hz:
                 continue
             fs = m.get("floor_strike")
