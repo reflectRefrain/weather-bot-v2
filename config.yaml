@@ -21,9 +21,9 @@ risk:
   min_model_prob: 0.80             # Lock-in strategy: only trade when model is >=80% confident
   kelly_fraction: 0.15             # Conservative Kelly fraction
   min_trade_usd: 1.00              # Minimum order size in dollars
-  max_trade_usd: 6.00              # Maximum order size per trade (~3% of bankroll)
-  max_per_ticker_usd: 6.00         # Hard cap per ticker regardless of Kelly
-  max_contracts: 15                # Hard cap on contracts per trade (prevents oversizing cheap entries)
+  max_trade_usd: 3.00              # Maximum order size per trade (lowered to prove strategy first)
+  max_per_ticker_usd: 3.00         # Hard cap per ticker (lowered to prove strategy first)
+  max_contracts: 15                # Hard cap on contracts per trade
   min_balance_usd: 50.00           # Pause if balance drops below this (25% drawdown)
   cancel_after_seconds: 120        # Cancel unfilled resting orders after 2 min
   trade_start_hour_local: 6        # (legacy) kept for compatibility
@@ -33,7 +33,6 @@ loop_sleep_seconds: 60             # Seconds between each cycle
 scan_every_n_cycles: 5            # Re-scan Kalshi markets every N cycles
 
 # Horizons: same_day only for true lock-in strategy.
-# next_day removed — pure forecast betting with no obs anchor advantage.
 horizons:
   - same_day
 
