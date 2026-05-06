@@ -62,6 +62,13 @@ def _migrate():
         c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_target ON model_decisions(city, target_date)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_ticker ON model_decisions(ticker)")
 
+        # Tier 2: add obs-trajectory projection columns if missing (idempotent).
+        md_cols = [r[1] for r in c.execute("PRAGMA table_info(model_decisions)").fetchall()]
+        if "projected_high_f" not in md_cols:
+            c.execute("ALTER TABLE model_decisions ADD COLUMN projected_high_f REAL")
+        if "projection_method" not in md_cols:
+            c.execute("ALTER TABLE model_decisions ADD COLUMN projection_method TEXT")
+
 def init_db():
     with conn() as c:
         c.executescript("""
@@ -152,6 +159,8 @@ def init_db():
             strike_high         REAL,
             forecast_f          REAL,
             obs_f               REAL,
+            projected_high_f    REAL,    -- Tier 2: obs-trajectory quadratic projection (F)
+            projection_method   TEXT,    -- 'quadratic' | 'observed_max' | 'latest' | NULL
             effective_forecast  REAL,
             sigma_used          REAL,
             model_prob_yes      REAL,
