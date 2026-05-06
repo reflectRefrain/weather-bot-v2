@@ -164,6 +164,69 @@ def main():
                 d_str = f"{d:+.2f}F" if d is not None else "   --"
                 print(f"  {r['method']:<14} {r['n']:>5}  {d_str}")
 
+    # 3c. Tier 2.2: NBM (Pirate Weather) availability + model disagreement.
+    if "nbm_high_f" in md_cols and "model_disagreement_f" in md_cols:
+        section("NBM second-source availability + disagreement")
+        nbm_stats = con.execute("""
+            SELECT
+                SUM(CASE WHEN nbm_high_f IS NOT NULL THEN 1 ELSE 0 END) AS with_nbm,
+                SUM(CASE WHEN nbm_high_f IS NULL     THEN 1 ELSE 0 END) AS without_nbm,
+                ROUND(AVG(model_disagreement_f), 3) AS avg_disagree,
+                ROUND(MAX(model_disagreement_f), 2) AS max_disagree
+            FROM model_decisions
+            WHERE ts >= ?
+        """, (since_iso,)).fetchone()
+        with_nbm = nbm_stats["with_nbm"] or 0
+        without = nbm_stats["without_nbm"] or 0
+        coverage = with_nbm / (with_nbm + without) if (with_nbm + without) else 0
+        print(f"  rows with NBM       : {with_nbm}  ({fmt_pct(coverage)} coverage)")
+        print(f"  rows without NBM    : {without}")
+        print(f"  avg |NWS - NBM|     : {fmt_num(nbm_stats['avg_disagree'], 6, 2)}F")
+        print(f"  max |NWS - NBM|     : {fmt_num(nbm_stats['max_disagree'], 6, 2)}F")
+        if with_nbm == 0 and without > 0:
+            print("  \u26a0  No NBM coverage \u2014 PIRATE_WEATHER_API_KEY may be unset.")
+        # Disagreement bucket histogram
+        rows = con.execute("""
+            SELECT CASE
+                       WHEN model_disagreement_f IS NULL THEN 'no_nbm'
+                       WHEN model_disagreement_f < 1 THEN '<1F'
+                       WHEN model_disagreement_f < 3 THEN '1-3F'
+                       WHEN model_disagreement_f < 5 THEN '3-5F'
+                       ELSE '>=5F (high noise)'
+                   END AS bucket,
+                   COUNT(*) AS n
+            FROM model_decisions
+            WHERE ts >= ?
+            GROUP BY bucket
+            ORDER BY n DESC
+        """, (since_iso,)).fetchall()
+        if rows:
+            print(f"\n  Disagreement histogram:")
+            for r in rows:
+                bar = "\u2588" * min(30, int(30 * r["n"] / total))
+                print(f"    {r['bucket']:<20} {r['n']:>5}  {bar}")
+
+    # 3d. Tier 2.3: book-type breakdown (lockin vs tail_short)
+    if "book_type" in md_cols:
+        section("Two-book candidate breakdown")
+        rows = con.execute("""
+            SELECT COALESCE(book_type, '(legacy)') AS book,
+                   COUNT(*) AS n,
+                   ROUND(AVG(model_prob_yes), 3) AS avg_pyes,
+                   ROUND(AVG(entry_price_cents), 1) AS avg_price_c
+            FROM model_decisions
+            WHERE ts >= ? AND decision LIKE 'candidate_%'
+            GROUP BY book
+            ORDER BY n DESC
+        """, (since_iso,)).fetchall()
+        if not rows:
+            print("  (no candidates this window)")
+        else:
+            print(f"  {'book':<14} {'n':>5} {'avg p_yes':>11} {'avg price':>11}")
+            for r in rows:
+                price = f"{r['avg_price_c']:.0f}c" if r['avg_price_c'] is not None else '  --'
+                print(f"  {r['book']:<14} {r['n']:>5} {fmt_pct(r['avg_pyes']):>11} {price:>11}")
+
     # 4. Sigma in use — catches a stuck/zero sigma
     section("Sigma actually used (by horizon)")
     rows = con.execute("""
