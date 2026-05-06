@@ -65,23 +65,60 @@ def time_adjusted_sigma(base_sigma: float, horizon: str, city: str = "NYC") -> f
         return base_sigma
 
 
-def adjusted_forecast(forecast_f, obs_f, variable, horizon):
-    """Anchor the effective model forecast using the current METAR observation.
+# Blend weight on the obs-trajectory projection for same_day HIGHTEMP.
+# 0.0 = ignore projection (old behavior), 1.0 = trust projection completely.
+# 0.7 means 70% projection / 30% NWS forecast — anchored hard to physical reality
+# while still respecting the model's atmospheric context.
+PROJECTION_BLEND_WEIGHT = 0.70
 
-    For same_day HIGHTEMP: the daily high cannot be below what's already been
-    observed. Use max(forecast, obs) as the model center.
 
-    For same_day LOWTEMP: the daily low cannot be above what's already been
-    observed. Use min(forecast, obs) as the model center.
+def adjusted_forecast(forecast_f, obs_f, variable, horizon, projection=None):
+    """Anchor the effective model forecast using the current METAR observation
+    and (when available) a projected high from the obs trajectory.
 
+    Args:
+        forecast_f: NWS forecast for the day's high (F)
+        obs_f:      latest METAR temp observation (F), or None
+        variable:   'HIGHTEMP' | 'LOWTEMP' | other
+        horizon:    'same_day' | 'next_day' | 'weekly'
+        projection: optional dict from MetarClient.project_high() with keys
+                    projected_high_f, method, observed_max_f, latest_temp_f.
+                    Pass None to use the original obs-anchor logic.
+
+    For same_day HIGHTEMP:
+      1. If projection is available with a non-None projected_high_f, blend it
+         with the NWS forecast: PROJECTION_BLEND_WEIGHT * proj + (1-w) * forecast.
+      2. Otherwise fall back to max(forecast, obs) — the prior anchor logic.
+      3. Final result is always floored at observed max (cannot be below obs).
+
+    For same_day LOWTEMP: min(forecast, obs) as the model center (unchanged).
     For next_day / weekly: obs has no anchoring power — return forecast unchanged.
     """
-    if obs_f is None or horizon != "same_day":
+    if horizon != "same_day":
         return forecast_f
+
     if variable == "HIGHTEMP":
-        return max(forecast_f, obs_f)
-    if variable == "LOWTEMP":
+        # Establish a floor: high cannot be below what's already been observed.
+        floor = obs_f
+        if projection and projection.get("observed_max_f") is not None:
+            floor = max(floor or projection["observed_max_f"], projection["observed_max_f"])
+
+        if projection and projection.get("projected_high_f") is not None and forecast_f is not None:
+            proj = projection["projected_high_f"]
+            w = PROJECTION_BLEND_WEIGHT
+            blended = w * proj + (1.0 - w) * forecast_f
+            if floor is not None:
+                blended = max(blended, floor)
+            return blended
+
+        # No projection — fall back to original obs anchor.
+        if obs_f is not None and forecast_f is not None:
+            return max(forecast_f, obs_f)
+        return forecast_f if forecast_f is not None else obs_f
+
+    if variable == "LOWTEMP" and obs_f is not None and forecast_f is not None:
         return min(forecast_f, obs_f)
+
     return forecast_f
 
 
