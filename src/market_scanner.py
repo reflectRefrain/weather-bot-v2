@@ -91,10 +91,11 @@ def log_decision(row: dict):
                 INSERT INTO model_decisions(
                     ts, cycle_id, ticker, city, variable, horizon, target_date,
                     strike_type, strike_low, strike_high,
-                    forecast_f, obs_f, effective_forecast, sigma_used,
+                    forecast_f, obs_f, projected_high_f, projection_method,
+                    effective_forecast, sigma_used,
                     model_prob_yes, market_mid, yes_bid, yes_ask,
                     edge_yes_cents, edge_no_cents, decision, entry_price_cents
-                ) VALUES (?,?,?,?,?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?, ?,?,?, ?,?,?,?, ?,?, ?,?,?,?, ?,?,?,?)
                 """,
                 (
                     dt.datetime.utcnow().isoformat(),
@@ -109,6 +110,8 @@ def log_decision(row: dict):
                     row.get("strike_high"),
                     row.get("forecast_f"),
                     row.get("obs_f"),
+                    row.get("projected_high_f"),
+                    row.get("projection_method"),
                     row.get("effective_forecast"),
                     row.get("sigma_used"),
                     row.get("model_prob_yes"),
@@ -316,15 +319,22 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
             continue
 
         obs_f = None
+        projection = None
         try:
             station = CITY_METAR.get(city)
             if station and metar_client:
                 obs = metar_client.latest(station)
                 obs_f = obs.get("temp_f")
+                # Same-day HIGHTEMP only — obs trajectory has no signal otherwise.
+                if hz == "same_day" and var == "HIGHTEMP":
+                    try:
+                        projection = metar_client.project_high(station, city)
+                    except Exception:
+                        projection = None
         except Exception:
             pass
 
-        effective_forecast = adjusted_forecast(forecast_f, obs_f, var, hz)
+        effective_forecast = adjusted_forecast(forecast_f, obs_f, var, hz, projection=projection)
         base_sigma = sigma_for(var, hz)
         sigma      = time_adjusted_sigma(base_sigma, hz, city)
 
@@ -352,6 +362,8 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
             "strike_high":        hi,
             "forecast_f":         forecast_f,
             "obs_f":              obs_f,
+            "projected_high_f":   (projection or {}).get("projected_high_f"),
+            "projection_method":  (projection or {}).get("method"),
             "effective_forecast": effective_forecast,
             "sigma_used":         round(sigma, 3) if sigma is not None else None,
             "model_prob_yes":     round(mp, 4),
