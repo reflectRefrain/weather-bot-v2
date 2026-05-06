@@ -299,6 +299,10 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
     tail_min_dist_f       = float(risk.get("tail_min_dist_f",        4.0))
     tail_min_reward       = float(risk.get("tail_min_reward_ratio",  1.5))
 
+    # Strategy gating — when False, only the two named books fire and the
+    # generic edge scanner below is bypassed (decisions still logged as skipped).
+    enable_legacy_edge_path = bool(risk.get("enable_legacy_edge_path", False))
+
     candidates = []
     for m in markets:
         var    = m.get("variable")
@@ -542,6 +546,13 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
                 continue
 
         # ----- LEGACY EITHER-SIDE EDGE PATH (fallback below) -----
+        # Gated off by default so attribution is clean: only the two named
+        # books (lockin + tail_short) trade. Flip risk.enable_legacy_edge_path
+        # to true in config.yaml to re-enable.
+        if not enable_legacy_edge_path:
+            decision_row["decision"] = "skip:legacy_path_disabled"
+            log_decision(decision_row)
+            continue
 
         if mp < min_model_prob and (1 - mp) < min_model_prob:
             decision_row["decision"] = "skip:below_min_model_prob"
