@@ -140,6 +140,30 @@ def main():
               f"{fmt_pct(r['avg_pyes']):>11} {fmt_pct(r['avg_mid']):>9} "
               f"{fmt_num(r['avg_edge_y'], 6, 2):>12}c")
 
+    # 3b. Tier 2: obs-trajectory projection method distribution.
+    # Skip the section entirely if column doesn't exist (older bot).
+    md_cols = [r[1] for r in con.execute("PRAGMA table_info(model_decisions)").fetchall()]
+    if "projection_method" in md_cols:
+        section("Projection method usage (HIGHTEMP same_day)")
+        rows = con.execute("""
+            SELECT
+                COALESCE(projection_method, '(none)') AS method,
+                COUNT(*) AS n,
+                ROUND(AVG(projected_high_f - forecast_f), 2) AS avg_proj_minus_fc
+            FROM model_decisions
+            WHERE ts >= ? AND variable = 'HIGHTEMP' AND horizon = 'same_day'
+            GROUP BY method
+            ORDER BY n DESC
+        """, (since_iso,)).fetchall()
+        if not rows:
+            print("  (no HIGHTEMP same_day rows)")
+        else:
+            print(f"  {'method':<14} {'n':>5}  avg(proj - fc)")
+            for r in rows:
+                d = r["avg_proj_minus_fc"]
+                d_str = f"{d:+.2f}F" if d is not None else "   --"
+                print(f"  {r['method']:<14} {r['n']:>5}  {d_str}")
+
     # 4. Sigma in use — catches a stuck/zero sigma
     section("Sigma actually used (by horizon)")
     rows = con.execute("""
