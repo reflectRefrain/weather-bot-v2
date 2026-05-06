@@ -91,10 +91,12 @@ def log_decision(row: dict):
                 INSERT INTO model_decisions(
                     ts, cycle_id, ticker, city, variable, horizon, target_date,
                     strike_type, strike_low, strike_high,
-                    forecast_f, obs_f, effective_forecast, sigma_used,
+                    forecast_f, obs_f, projected_high_f, projection_method,
+                    nbm_high_f, model_disagreement_f,
+                    effective_forecast, sigma_used,
                     model_prob_yes, market_mid, yes_bid, yes_ask,
-                    edge_yes_cents, edge_no_cents, decision, entry_price_cents
-                ) VALUES (?,?,?,?,?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?)
+                    edge_yes_cents, edge_no_cents, decision, book_type, entry_price_cents
+                ) VALUES (?,?,?,?,?,?,?, ?,?,?, ?,?,?,?, ?,?, ?,?, ?,?,?,?, ?,?,?,?,?)
                 """,
                 (
                     dt.datetime.utcnow().isoformat(),
@@ -109,6 +111,10 @@ def log_decision(row: dict):
                     row.get("strike_high"),
                     row.get("forecast_f"),
                     row.get("obs_f"),
+                    row.get("projected_high_f"),
+                    row.get("projection_method"),
+                    row.get("nbm_high_f"),
+                    row.get("model_disagreement_f"),
                     row.get("effective_forecast"),
                     row.get("sigma_used"),
                     row.get("model_prob_yes"),
@@ -118,6 +124,7 @@ def log_decision(row: dict):
                     row.get("edge_yes_cents"),
                     row.get("edge_no_cents"),
                     row.get("decision"),
+                    row.get("book_type"),
                     row.get("entry_price_cents"),
                 ),
             )
@@ -251,16 +258,28 @@ def fetch_single(k, ticker):
         return {}
 
 
-def score_candidates(markets, noaa_client, metar_client, cfg):
+def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
     """
     Score each market against NOAA forecast + METAR obs anchor.
 
-    VETERAN RULES ENFORCED:
+    Tier 2.3 two-book candidate emission:
+      - LOCK-IN BOOK: YES side, model_prob >= 0.85, price <= 92c, strike
+        within 2F of effective forecast, min_reward_ratio 0.10. The bread
+        and butter — small edge, frequent fills, high hit rate.
+      - TAIL-SHORT BOOK: NO side, model_prob_NO >= 0.95, NO price 15-30c,
+        strike >= 4F from effective forecast, min_reward_ratio 1.5. Picks
+        up the small percentage of the time when an unhinged tail closes
+        cheap and we can cash on it disqualifying.
+      - LEGACY "either side has edge" path stays as a fallback so we keep
+        non-extreme trades flowing while the new books accumulate data.
+
+    VETERAN RULES ENFORCED (legacy path):
     1. max_entry_no_cents  — never pay >75c for a NO (bad risk/reward trap)
     2. min_reward_ratio    — profit potential must be >= 25c per $1 risked
     3. Sizing favors cheap high-edge trades over expensive "sure things"
     """
-    from model import sigma_for, time_adjusted_sigma, adjusted_forecast, yes_prob, market_mid_prob
+    from model import (sigma_for, time_adjusted_sigma, adjusted_forecast,
+                       yes_prob, market_mid_prob, disagreement_sigma_bonus)
     risk = cfg.get("risk", {})
     min_model_prob      = float(risk.get("min_model_prob",    0.80))
     min_edge_cents      = float(risk.get("min_edge_cents",    6))
@@ -268,6 +287,17 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
     max_entry_cents     = float(risk.get("max_entry_cents",   90))
     max_entry_no_cents  = float(risk.get("max_entry_no_cents", 75))
     min_reward_ratio    = float(risk.get("min_reward_ratio",   0.25))
+
+    # Tier 2.3 book filter parameters — overridable from config.yaml under risk:
+    lockin_min_prob       = float(risk.get("lockin_min_prob",        0.85))
+    lockin_max_price      = float(risk.get("lockin_max_price_cents", 92))
+    lockin_max_dist_f     = float(risk.get("lockin_max_dist_f",      2.0))
+    lockin_min_reward     = float(risk.get("lockin_min_reward_ratio", 0.10))
+    tail_min_prob_no      = float(risk.get("tail_min_prob_no",       0.95))
+    tail_no_price_min     = float(risk.get("tail_no_price_min",      15))
+    tail_no_price_max     = float(risk.get("tail_no_price_max",      30))
+    tail_min_dist_f       = float(risk.get("tail_min_dist_f",        4.0))
+    tail_min_reward       = float(risk.get("tail_min_reward_ratio",  1.5))
 
     candidates = []
     for m in markets:
@@ -316,17 +346,52 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
             continue
 
         obs_f = None
+        projection = None
         try:
             station = CITY_METAR.get(city)
             if station and metar_client:
                 obs = metar_client.latest(station)
                 obs_f = obs.get("temp_f")
+                # Same-day HIGHTEMP only — obs trajectory has no signal otherwise.
+                if hz == "same_day" and var == "HIGHTEMP":
+                    try:
+                        projection = metar_client.project_high(station, city)
+                    except Exception:
+                        projection = None
         except Exception:
             pass
 
-        effective_forecast = adjusted_forecast(forecast_f, obs_f, var, hz)
+        # Tier 2.2: pull NBM (Pirate Weather) second-source forecast.
+        # Best-effort — missing key, network down, no daily block all return None.
+        nbm_high_f = None
+        nbm_low_f = None
+        try:
+            if nbm_client and nbm_client.enabled():
+                nbm = nbm_client.forecast_high(coords[0], coords[1], m.get("target_date"))
+                if nbm:
+                    nbm_high_f = nbm.get("high_f")
+                    nbm_low_f = nbm.get("low_f")
+        except Exception:
+            pass
+
+        # Pick the right NBM value for the variable — model.adjusted_forecast()
+        # accepts a single nbm_high_f param that means "NBM same-direction value".
+        nbm_for_var = nbm_high_f if var == "HIGHTEMP" else nbm_low_f
+
+        effective_forecast = adjusted_forecast(
+            forecast_f, obs_f, var, hz,
+            projection=projection, nbm_high_f=nbm_for_var,
+        )
+
+        # Disagreement signal — only meaningful when both NWS and NBM exist.
+        model_disagreement_f = None
+        sigma_bonus = 0.0
+        if forecast_f is not None and nbm_for_var is not None:
+            model_disagreement_f = abs(forecast_f - nbm_for_var)
+            sigma_bonus = disagreement_sigma_bonus(model_disagreement_f)
+
         base_sigma = sigma_for(var, hz)
-        sigma      = time_adjusted_sigma(base_sigma, hz, city)
+        sigma      = time_adjusted_sigma(base_sigma, hz, city) + sigma_bonus
 
         mp  = yes_prob(effective_forecast, sigma, st, lo, hi)
         if mp is None:
@@ -342,27 +407,141 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
         # Capture decision for the model_decisions log.
         # Default outcome is 'skip:<reason>'; mutated below if we add to candidates.
         decision_row = {
-            "ticker":             ticker,
-            "city":               city,
-            "variable":           var,
-            "horizon":            hz,
-            "target_date":        m.get("target_date"),
-            "strike_type":        st,
-            "strike_low":         lo,
-            "strike_high":        hi,
-            "forecast_f":         forecast_f,
-            "obs_f":              obs_f,
-            "effective_forecast": effective_forecast,
-            "sigma_used":         round(sigma, 3) if sigma is not None else None,
-            "model_prob_yes":     round(mp, 4),
-            "market_mid":         round(mid, 4),
-            "yes_bid":            yb,
-            "yes_ask":            ya,
-            "edge_yes_cents":     round(edge_yes, 2),
-            "edge_no_cents":      round(edge_no, 2),
-            "decision":           "skip:no_branch_taken",
-            "entry_price_cents":  None,
+            "ticker":               ticker,
+            "city":                 city,
+            "variable":             var,
+            "horizon":              hz,
+            "target_date":          m.get("target_date"),
+            "strike_type":          st,
+            "strike_low":           lo,
+            "strike_high":          hi,
+            "forecast_f":           forecast_f,
+            "obs_f":                obs_f,
+            "projected_high_f":     (projection or {}).get("projected_high_f"),
+            "projection_method":    (projection or {}).get("method"),
+            "nbm_high_f":           nbm_for_var,
+            "model_disagreement_f": round(model_disagreement_f, 3) if model_disagreement_f is not None else None,
+            "effective_forecast":   effective_forecast,
+            "sigma_used":           round(sigma, 3) if sigma is not None else None,
+            "model_prob_yes":       round(mp, 4),
+            "market_mid":           round(mid, 4),
+            "yes_bid":              yb,
+            "yes_ask":              ya,
+            "edge_yes_cents":       round(edge_yes, 2),
+            "edge_no_cents":        round(edge_no, 2),
+            "decision":             "skip:no_branch_taken",
+            "book_type":            None,
+            "entry_price_cents":    None,
         }
+
+        # ----------------------------------------------------------------
+        # Tier 2.3: TWO-BOOK candidate emission. Try lock-in book first, then
+        # tail-short book. Both can fire on the same scan against the same
+        # market only if they target different sides (lock-in YES + tail NO).
+        # `strike_distance_f` = |effective_forecast - strike midpoint or edge|
+        # used for the distance-from-projection floor in tail shorts.
+        # ----------------------------------------------------------------
+        if effective_forecast is not None:
+            strike_ref = None
+            if st == "greater" and lo is not None:
+                strike_ref = float(lo)
+            elif st == "less" and hi is not None:
+                strike_ref = float(hi)
+            elif st == "between" and lo is not None and hi is not None:
+                strike_ref = (float(lo) + float(hi)) / 2.0
+            strike_distance_f = abs(effective_forecast - strike_ref) if strike_ref is not None else None
+        else:
+            strike_distance_f = None
+
+        # ----- LOCK-IN BOOK (YES) -----
+        no_ask_for_market = 100 - yb if yb is not None else None
+        if (
+            mp >= lockin_min_prob
+            and ya is not None
+            and ya <= lockin_max_price
+            and ya >= min_entry_cents
+            and strike_distance_f is not None
+            and strike_distance_f <= lockin_max_dist_f
+        ):
+            reward_ratio_lock = (100 - ya) / ya if ya > 0 else 0
+            if reward_ratio_lock >= lockin_min_reward:
+                lock_row = dict(decision_row)
+                lock_row["decision"] = "candidate_yes"
+                lock_row["book_type"] = "lockin"
+                lock_row["entry_price_cents"] = ya
+                log_decision(lock_row)
+                candidates.append({
+                    "ticker":             ticker,
+                    "side":               "yes",
+                    "book_type":          "lockin",
+                    "variable":           var,
+                    "city":               city,
+                    "horizon":            hz,
+                    "strike_type":        st,
+                    "strike_low":         lo,
+                    "strike_high":        hi,
+                    "yes_bid":            yb,
+                    "yes_ask":            ya,
+                    "model_prob":         mp,
+                    "market_mid":         mid,
+                    "edge_cents":         round(edge_yes, 2),
+                    "forecast_f":         forecast_f,
+                    "effective_forecast": effective_forecast,
+                    "obs_f":              obs_f,
+                    "sigma_used":         round(sigma, 2),
+                    "price_cents":        ya,
+                    "reward_ratio":       round(reward_ratio_lock, 3),
+                    "target_date":        m.get("target_date"),
+                    "strike_distance_f":  round(strike_distance_f, 2),
+                })
+                # Lock-in candidates do NOT also try tail-short for the same
+                # ticker — a strike close to forecast can't simultaneously be
+                # a far-tail short.
+                continue
+
+        # ----- TAIL-SHORT BOOK (NO) -----
+        prob_no = 1.0 - mp
+        if (
+            prob_no >= tail_min_prob_no
+            and no_ask_for_market is not None
+            and tail_no_price_min <= no_ask_for_market <= tail_no_price_max
+            and strike_distance_f is not None
+            and strike_distance_f >= tail_min_dist_f
+        ):
+            reward_ratio_tail = (100 - no_ask_for_market) / no_ask_for_market if no_ask_for_market > 0 else 0
+            if reward_ratio_tail >= tail_min_reward:
+                tail_row = dict(decision_row)
+                tail_row["decision"] = "candidate_no"
+                tail_row["book_type"] = "tail_short"
+                tail_row["entry_price_cents"] = no_ask_for_market
+                log_decision(tail_row)
+                candidates.append({
+                    "ticker":             ticker,
+                    "side":               "no",
+                    "book_type":          "tail_short",
+                    "variable":           var,
+                    "city":               city,
+                    "horizon":            hz,
+                    "strike_type":        st,
+                    "strike_low":         lo,
+                    "strike_high":        hi,
+                    "yes_bid":            yb,
+                    "yes_ask":            ya,
+                    "model_prob":         prob_no,
+                    "market_mid":         1 - mid,
+                    "edge_cents":         round(edge_no, 2),
+                    "forecast_f":         forecast_f,
+                    "effective_forecast": effective_forecast,
+                    "obs_f":              obs_f,
+                    "sigma_used":         round(sigma, 2),
+                    "price_cents":        no_ask_for_market,
+                    "reward_ratio":       round(reward_ratio_tail, 3),
+                    "target_date":        m.get("target_date"),
+                    "strike_distance_f":  round(strike_distance_f, 2),
+                })
+                continue
+
+        # ----- LEGACY EITHER-SIDE EDGE PATH (fallback below) -----
 
         if mp < min_model_prob and (1 - mp) < min_model_prob:
             decision_row["decision"] = "skip:below_min_model_prob"
@@ -540,7 +719,8 @@ def scan_once(config_path="/app/config.yaml"):
     return collected
 
 
-def scan(kalshi_client=None, noaa_client=None, metar_client=None, config_path="/app/config.yaml"):
+def scan(kalshi_client=None, noaa_client=None, metar_client=None,
+         nbm_client=None, config_path="/app/config.yaml"):
     """Main entry point called by main.py."""
     from noaa_client import NoaaClient
     from metar_client import MetarClient
@@ -551,8 +731,14 @@ def scan(kalshi_client=None, noaa_client=None, metar_client=None, config_path="/
         noaa_client = NoaaClient()
     if metar_client is None:
         metar_client = MetarClient()
+    if nbm_client is None:
+        try:
+            from nbm_client import NbmClient
+            nbm_client = NbmClient()  # reads PIRATE_WEATHER_API_KEY from env
+        except Exception:
+            nbm_client = None
     markets = scan_once(config_path=config_path)
-    return score_candidates(markets, noaa_client, metar_client, cfg)
+    return score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=nbm_client)
 
 
 if __name__ == "__main__":
