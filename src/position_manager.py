@@ -20,10 +20,29 @@ Usage:
 
 import sys
 import datetime as dt
+from zoneinfo import ZoneInfo
 from db import conn
 from kalshi_client import KalshiClient
 from executor import get_state
 from cooldown import add_cooldown
+
+# Pre-settlement lock-in: after this local hour, sell winners at bid instead
+# of holding to settlement. Variance from 4:30 PM → settlement is unrewarded
+# on lock-in book (spline projection already shows the high is in).
+LOCKIN_HOUR_LOCAL = 16.0          # 4:00 PM local
+LOCKIN_MIN_PROFIT_CENTS = 5       # need at least 5c profit at bid to lock in
+
+CITY_TZ_LOCKIN = {
+    "NYC":  "America/New_York",
+    "BOS":  "America/New_York",
+    "PHIL": "America/New_York",
+    "MIA":  "America/New_York",
+    "CHI":  "America/Chicago",
+    "HOU":  "America/Chicago",
+    "AUS":  "America/Chicago",
+    "DEN":  "America/Denver",
+    "LAX":  "America/Los_Angeles",
+}
 
 
 TEST_TICKER = "TEST-POSITION-MANAGER"
@@ -213,9 +232,32 @@ def close_live_position(kalshi_client, row, exit_cents, reason, dry_run=True):
     }
 
 
+def _city_for_ticker(ticker: str):
+    """Look up the city for a ticker via the markets table. Returns None if unknown."""
+    try:
+        with conn() as c:
+            row = c.execute(
+                "SELECT city FROM markets WHERE ticker=? LIMIT 1", (ticker,)
+            ).fetchone()
+        return row["city"] if row else None
+    except Exception:
+        return None
+
+
+def _local_hour_for_ticker(ticker: str):
+    """Return current local-clock hour (decimal) for the city the ticker resolves
+    against. Falls back to America/Chicago if unknown."""
+    city = _city_for_ticker(ticker)
+    tz_name = CITY_TZ_LOCKIN.get(city, "America/Chicago")
+    now = dt.datetime.now(ZoneInfo(tz_name))
+    return now.hour + now.minute / 60.0
+
+
 def decision_for_position(row, exit_price_cents):
     tp = row["tp_price"]
     sl = row["sl_price"]
+    entry = row["avg_price_cents"]
+    ticker = row["ticker"]
 
     if exit_price_cents is None or exit_price_cents <= 1:
         return "HOLD", "no_exit_price"
@@ -223,6 +265,17 @@ def decision_for_position(row, exit_price_cents):
         return "TP", "take_profit"
     if sl is not None and exit_price_cents <= int(sl):
         return "SL", "stop_loss"
+
+    # Pre-settlement lock-in: late in the local day, take any 5c+ winner at bid.
+    # Don't carry variance through to settlement when the high is essentially in.
+    try:
+        if entry is not None and exit_price_cents >= int(entry) + LOCKIN_MIN_PROFIT_CENTS:
+            local_h = _local_hour_for_ticker(ticker)
+            if local_h >= LOCKIN_HOUR_LOCAL:
+                return "TP", "LOCKIN"
+    except Exception:
+        pass
+
     return "HOLD", "inside_band"
 
 

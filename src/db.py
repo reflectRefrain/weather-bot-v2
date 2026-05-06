@@ -27,6 +27,41 @@ def _migrate():
         if "exit_reason" not in cols:
             c.execute("ALTER TABLE positions ADD COLUMN exit_reason TEXT")
 
+        # model_decisions table — created by executescript above for fresh DBs.
+        # For older DBs without it, create it here so migrations are idempotent.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS model_decisions (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts                  TEXT NOT NULL,
+                cycle_id            TEXT,
+                ticker              TEXT NOT NULL,
+                city                TEXT,
+                variable            TEXT,
+                horizon             TEXT,
+                target_date         TEXT,
+                strike_type         TEXT,
+                strike_low          REAL,
+                strike_high         REAL,
+                forecast_f          REAL,
+                obs_f               REAL,
+                effective_forecast  REAL,
+                sigma_used          REAL,
+                model_prob_yes      REAL,
+                market_mid          REAL,
+                yes_bid             INTEGER,
+                yes_ask             INTEGER,
+                edge_yes_cents      REAL,
+                edge_no_cents       REAL,
+                decision            TEXT,
+                entry_price_cents   INTEGER,
+                settled_high_f      REAL,
+                settled_outcome     TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_ts ON model_decisions(ts)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_target ON model_decisions(city, target_date)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_ticker ON model_decisions(ticker)")
+
 def init_db():
     with conn() as c:
         c.executescript("""
@@ -99,6 +134,40 @@ def init_db():
             key             TEXT PRIMARY KEY,
             value           TEXT
         );
+
+        -- Every-cycle decision log. Foundation for empirical sigma calibration,
+        -- Brier score reporting, and replay backtest harness.
+        -- One row per (cycle, market) we evaluate, traded or not.
+        CREATE TABLE IF NOT EXISTS model_decisions (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts                  TEXT NOT NULL,
+            cycle_id            TEXT,
+            ticker              TEXT NOT NULL,
+            city                TEXT,
+            variable            TEXT,
+            horizon             TEXT,
+            target_date         TEXT,
+            strike_type         TEXT,
+            strike_low          REAL,
+            strike_high         REAL,
+            forecast_f          REAL,
+            obs_f               REAL,
+            effective_forecast  REAL,
+            sigma_used          REAL,
+            model_prob_yes      REAL,
+            market_mid          REAL,
+            yes_bid             INTEGER,
+            yes_ask             INTEGER,
+            edge_yes_cents      REAL,
+            edge_no_cents       REAL,
+            decision            TEXT,    -- 'enter_yes' | 'enter_no' | 'skip:<reason>'
+            entry_price_cents   INTEGER,
+            settled_high_f      REAL,    -- backfilled by calibrate script
+            settled_outcome     TEXT     -- 'YES' | 'NO' | NULL until resolved
+        );
+        CREATE INDEX IF NOT EXISTS idx_decisions_ts ON model_decisions(ts);
+        CREATE INDEX IF NOT EXISTS idx_decisions_target ON model_decisions(city, target_date);
+        CREATE INDEX IF NOT EXISTS idx_decisions_ticker ON model_decisions(ticker);
 
         INSERT OR IGNORE INTO state(key,value) VALUES('kill_switch','OFF');
         INSERT OR IGNORE INTO state(key,value) VALUES('mode','paper');

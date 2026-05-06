@@ -47,9 +47,9 @@ cities:
     lon: -73.9692
     metar: KNYC
   - code: CHI
-    lat: 41.9803
-    lon: -87.9090
-    metar: KORD
+    lat: 41.7868
+    lon: -87.7522
+    metar: KMDW    # Kalshi settles Chicago HIGHTEMP on Midway, NOT O'Hare
   - code: MIA
     lat: 25.7959
     lon: -80.2870

@@ -23,7 +23,7 @@ CONFIG_PATH = os.getenv("CONFIG_PATH", "/app/config.yaml")
 CITY_METAR = {
     "NYC":  "KNYC",
     "LAX":  "KLAX",
-    "CHI":  "KORD",
+    "CHI":  "KMDW",   # Kalshi CLI settles on Midway, not O'Hare
     "MIA":  "KMIA",
     "DEN":  "KDEN",
     "AUS":  "KAUS",
