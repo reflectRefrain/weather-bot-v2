@@ -381,7 +381,7 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
             decision_row["decision"] = "candidate_yes"
             decision_row["entry_price_cents"] = ya
             log_decision(decision_row)
-            candidates.append({
+            candidates.append({  # noqa: log_decision happens above
                 "ticker":             ticker,
                 "side":               "yes",
                 "variable":           var,
@@ -403,6 +403,13 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
                 "reward_ratio":       round(reward_ratio, 3),
                 "target_date":        m.get("target_date"),
             })
+
+        # YES had edge but failed price gate (too cheap or too expensive).
+        # Log it so empirical sigma calibration sees the boundary cases too.
+        elif edge_yes >= min_edge_cents:
+            decision_row["decision"] = f"skip:yes_price_oob:{ya}"
+            log_decision(decision_row)
+            continue
 
         # NO side
         elif edge_no >= min_edge_cents:
@@ -450,6 +457,12 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
                 "reward_ratio":       round(reward_ratio, 3),
                 "target_date":        m.get("target_date"),
             })
+
+        # Neither YES nor NO had enough edge. Still log so we have the
+        # full distribution for calibration (including 'boring' markets).
+        else:
+            decision_row["decision"] = "skip:no_edge_either_side"
+            log_decision(decision_row)
 
     candidates.sort(key=lambda x: x["edge_cents"], reverse=True)
     return candidates
