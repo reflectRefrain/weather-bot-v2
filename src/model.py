@@ -71,8 +71,47 @@ def time_adjusted_sigma(base_sigma: float, horizon: str, city: str = "NYC") -> f
 # while still respecting the model's atmospheric context.
 PROJECTION_BLEND_WEIGHT = 0.70
 
+# When NBM (Pirate Weather) is available and projection is NOT, blend NWS+NBM
+# 50/50 as a primitive ensemble. Equal weight because both are deterministic
+# point forecasts of similar skill — neither has obvious priority on its own.
+NBM_BLEND_WEIGHT = 0.50
 
-def adjusted_forecast(forecast_f, obs_f, variable, horizon, projection=None):
+# When NWS and NBM disagree by more than this many degrees F, the truth is
+# noisier than either model implies. Inflate sigma proportionally so we don't
+# overstate confidence.
+DISAGREEMENT_THRESHOLD_F = 3.0
+# Each degree of disagreement above the threshold adds this much to sigma.
+DISAGREEMENT_SIGMA_GAIN_F = 0.40
+# Cap on disagreement-induced sigma inflation (don't let one outlier feed
+# blow the model up).
+DISAGREEMENT_SIGMA_CAP_F = 2.5
+
+
+def ensemble_forecast(nws_f, nbm_f):
+    """Combine NWS and NBM into a single deterministic forecast.
+
+    Returns (blended_f, disagreement_f) where disagreement is |nws - nbm|
+    or None if either input is missing.
+    """
+    if nws_f is None and nbm_f is None:
+        return None, None
+    if nws_f is None:
+        return nbm_f, None
+    if nbm_f is None:
+        return nws_f, None
+    blended = NBM_BLEND_WEIGHT * nbm_f + (1.0 - NBM_BLEND_WEIGHT) * nws_f
+    return blended, abs(nws_f - nbm_f)
+
+
+def disagreement_sigma_bonus(disagreement_f):
+    """Return extra sigma (F) to add when the two model forecasts diverge."""
+    if disagreement_f is None:
+        return 0.0
+    excess = max(0.0, disagreement_f - DISAGREEMENT_THRESHOLD_F)
+    return min(DISAGREEMENT_SIGMA_CAP_F, excess * DISAGREEMENT_SIGMA_GAIN_F)
+
+
+def adjusted_forecast(forecast_f, obs_f, variable, horizon, projection=None, nbm_high_f=None):
     """Anchor the effective model forecast using the current METAR observation
     and (when available) a projected high from the obs trajectory.
 
@@ -84,6 +123,9 @@ def adjusted_forecast(forecast_f, obs_f, variable, horizon, projection=None):
         projection: optional dict from MetarClient.project_high() with keys
                     projected_high_f, method, observed_max_f, latest_temp_f.
                     Pass None to use the original obs-anchor logic.
+        nbm_high_f: optional NBM (Pirate Weather) high-temp point forecast (F)
+                    for HIGHTEMP, or low for LOWTEMP. Used as a 2nd-source
+                    ensemble when no obs-trajectory projection is available.
 
     For same_day HIGHTEMP:
       1. If projection is available with a non-None projected_high_f, blend it
@@ -103,6 +145,8 @@ def adjusted_forecast(forecast_f, obs_f, variable, horizon, projection=None):
         if projection and projection.get("observed_max_f") is not None:
             floor = max(floor or projection["observed_max_f"], projection["observed_max_f"])
 
+        # First: if obs trajectory projection is available, that beats both
+        # NWS and NBM because it's grounded in current atmospheric reality.
         if projection and projection.get("projected_high_f") is not None and forecast_f is not None:
             proj = projection["projected_high_f"]
             w = PROJECTION_BLEND_WEIGHT
@@ -111,13 +155,30 @@ def adjusted_forecast(forecast_f, obs_f, variable, horizon, projection=None):
                 blended = max(blended, floor)
             return blended
 
-        # No projection — fall back to original obs anchor.
+        # Second: if NBM is available, ensemble NWS+NBM 50/50.
+        if nbm_high_f is not None and forecast_f is not None:
+            ens, _ = ensemble_forecast(forecast_f, nbm_high_f)
+            if ens is not None and floor is not None:
+                ens = max(ens, floor)
+            return ens
+
+        # Third: no projection, no NBM — original obs anchor.
         if obs_f is not None and forecast_f is not None:
             return max(forecast_f, obs_f)
         return forecast_f if forecast_f is not None else obs_f
 
-    if variable == "LOWTEMP" and obs_f is not None and forecast_f is not None:
-        return min(forecast_f, obs_f)
+    if variable == "LOWTEMP":
+        # Symmetric ensemble for low temp when NBM is around.
+        eff = forecast_f
+        if nbm_high_f is not None and forecast_f is not None:
+            # Note: caller passes nbm_high_f loosely; for LOWTEMP this is the
+            # NBM low (we re-use the parameter name for backward compat).
+            ens, _ = ensemble_forecast(forecast_f, nbm_high_f)
+            if ens is not None:
+                eff = ens
+        if obs_f is not None and eff is not None:
+            return min(eff, obs_f)
+        return eff
 
     return forecast_f
 

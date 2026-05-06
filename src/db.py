@@ -69,6 +69,17 @@ def _migrate():
         if "projection_method" not in md_cols:
             c.execute("ALTER TABLE model_decisions ADD COLUMN projection_method TEXT")
 
+        # Tier 2.2: add NBM (Pirate Weather) second-source columns if missing.
+        md_cols = [r[1] for r in c.execute("PRAGMA table_info(model_decisions)").fetchall()]
+        if "nbm_high_f" not in md_cols:
+            c.execute("ALTER TABLE model_decisions ADD COLUMN nbm_high_f REAL")
+        if "model_disagreement_f" not in md_cols:
+            c.execute("ALTER TABLE model_decisions ADD COLUMN model_disagreement_f REAL")
+
+        # Tier 2.3: add book-type column to distinguish lock-in vs tail-short.
+        if "book_type" not in md_cols:
+            c.execute("ALTER TABLE model_decisions ADD COLUMN book_type TEXT")
+
 def init_db():
     with conn() as c:
         c.executescript("""
@@ -161,6 +172,8 @@ def init_db():
             obs_f               REAL,
             projected_high_f    REAL,    -- Tier 2: obs-trajectory quadratic projection (F)
             projection_method   TEXT,    -- 'quadratic' | 'observed_max' | 'latest' | NULL
+            nbm_high_f          REAL,    -- Tier 2.2: NBM (Pirate Weather) point forecast (F)
+            model_disagreement_f REAL,   -- Tier 2.2: |NWS - NBM| in F, NULL if either missing
             effective_forecast  REAL,
             sigma_used          REAL,
             model_prob_yes      REAL,
@@ -170,6 +183,7 @@ def init_db():
             edge_yes_cents      REAL,
             edge_no_cents       REAL,
             decision            TEXT,    -- 'enter_yes' | 'enter_no' | 'skip:<reason>'
+            book_type           TEXT,    -- Tier 2.3: 'lockin' | 'tail_short' | NULL
             entry_price_cents   INTEGER,
             settled_high_f      REAL,    -- backfilled by calibrate script
             settled_outcome     TEXT     -- 'YES' | 'NO' | NULL until resolved
