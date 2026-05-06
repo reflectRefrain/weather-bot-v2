@@ -7,7 +7,7 @@ from kalshi_client import KalshiClient
 CITY_COORDS = {
     "NYC":  (40.7789, -73.9692),
     "LAX":  (33.9425, -118.4081),
-    "CHI":  (41.9742, -87.9073),
+    "CHI":  (41.7868, -87.7522),   # Midway (KMDW) — Kalshi settlement station
     "MIA":  (25.7959, -80.2870),
     "DEN":  (39.8561, -104.6737),
     "AUS":  (30.1975, -97.6664),
@@ -19,7 +19,7 @@ CITY_COORDS = {
 CITY_METAR = {
     "NYC":  "KNYC",
     "LAX":  "KLAX",
-    "CHI":  "KORD",
+    "CHI":  "KMDW",   # Kalshi CLI settles on Midway, not O'Hare
     "MIA":  "KMIA",
     "DEN":  "KDEN",
     "AUS":  "KAUS",
@@ -65,8 +65,8 @@ MONTHS = {m: i + 1 for i, m in enumerate(
 )}
 
 # ── Entry time windows (local hour, inclusive) ────────────────────────────────
-SAME_DAY_ENTRY_START = 14  # 2 PM local
-SAME_DAY_ENTRY_END   = 15  # 3 PM local
+SAME_DAY_ENTRY_START = 14.5  # 2:30 PM local — obs anchor strongest after 14:30
+SAME_DAY_ENTRY_END   = 16.5  # 4:30 PM local — high usually in; pure lock-in window
 NEXT_DAY_ENTRY_START = 6
 NEXT_DAY_ENTRY_END   = 10
 
@@ -77,6 +77,56 @@ def log_event(level, module, message):
             "INSERT INTO events(ts,level,module,message) VALUES(?,?,?,?)",
             (dt.datetime.utcnow().isoformat(), level, module, message),
         )
+
+
+def log_decision(row: dict):
+    """Append one row to model_decisions. Foundation for empirical sigma
+    calibration, Brier score reports, and replay backtest. Best-effort —
+    never raises, never blocks the scan loop.
+    """
+    try:
+        with conn() as c:
+            c.execute(
+                """
+                INSERT INTO model_decisions(
+                    ts, cycle_id, ticker, city, variable, horizon, target_date,
+                    strike_type, strike_low, strike_high,
+                    forecast_f, obs_f, effective_forecast, sigma_used,
+                    model_prob_yes, market_mid, yes_bid, yes_ask,
+                    edge_yes_cents, edge_no_cents, decision, entry_price_cents
+                ) VALUES (?,?,?,?,?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?)
+                """,
+                (
+                    dt.datetime.utcnow().isoformat(),
+                    row.get("cycle_id"),
+                    row.get("ticker"),
+                    row.get("city"),
+                    row.get("variable"),
+                    row.get("horizon"),
+                    row.get("target_date"),
+                    row.get("strike_type"),
+                    row.get("strike_low"),
+                    row.get("strike_high"),
+                    row.get("forecast_f"),
+                    row.get("obs_f"),
+                    row.get("effective_forecast"),
+                    row.get("sigma_used"),
+                    row.get("model_prob_yes"),
+                    row.get("market_mid"),
+                    row.get("yes_bid"),
+                    row.get("yes_ask"),
+                    row.get("edge_yes_cents"),
+                    row.get("edge_no_cents"),
+                    row.get("decision"),
+                    row.get("entry_price_cents"),
+                ),
+            )
+    except Exception as e:
+        # Never let logging break the trade loop.
+        try:
+            log_event("WARN", "scanner", f"log_decision failed: {str(e)[:160]}")
+        except Exception:
+            pass
 
 
 def build_series_list(cfg):
@@ -144,16 +194,17 @@ def horizon_of(target_date_iso: str, city: str = "NYC") -> str:
 def is_valid_entry_time(horizon: str, city: str) -> bool:
     """
     Gate entries by local time of day.
-    same_day: 2PM-3PM local only (obs-anchored lock-in window).
+    same_day: 2:30PM-4:30PM local (obs-anchored lock-in window).
     """
     try:
         tz = ZoneInfo(CITY_TZ.get(city, "America/New_York"))
-        hour = dt.datetime.now(tz).hour
+        now = dt.datetime.now(tz)
+        hour = now.hour + now.minute / 60.0   # decimal local hour for fractional windows
         if horizon == "same_day":
             ok = SAME_DAY_ENTRY_START <= hour <= SAME_DAY_ENTRY_END
             if not ok:
                 log_event("INFO", "scanner",
-                          f"entry_time_block: {city} same_day local_hour={hour} "
+                          f"entry_time_block: {city} same_day local_hour={hour:.2f} "
                           f"window={SAME_DAY_ENTRY_START}-{SAME_DAY_ENTRY_END}")
             return ok
         if horizon == "next_day":
@@ -288,7 +339,34 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
         edge_yes = (mp - mid) * 100
         edge_no  = ((1 - mp) - (1 - mid)) * 100
 
+        # Capture decision for the model_decisions log.
+        # Default outcome is 'skip:<reason>'; mutated below if we add to candidates.
+        decision_row = {
+            "ticker":             ticker,
+            "city":               city,
+            "variable":           var,
+            "horizon":            hz,
+            "target_date":        m.get("target_date"),
+            "strike_type":        st,
+            "strike_low":         lo,
+            "strike_high":        hi,
+            "forecast_f":         forecast_f,
+            "obs_f":              obs_f,
+            "effective_forecast": effective_forecast,
+            "sigma_used":         round(sigma, 3) if sigma is not None else None,
+            "model_prob_yes":     round(mp, 4),
+            "market_mid":         round(mid, 4),
+            "yes_bid":            yb,
+            "yes_ask":            ya,
+            "edge_yes_cents":     round(edge_yes, 2),
+            "edge_no_cents":      round(edge_no, 2),
+            "decision":           "skip:no_branch_taken",
+            "entry_price_cents":  None,
+        }
+
         if mp < min_model_prob and (1 - mp) < min_model_prob:
+            decision_row["decision"] = "skip:below_min_model_prob"
+            log_decision(decision_row)
             continue
 
         # YES side
@@ -297,7 +375,12 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
             if reward_ratio < min_reward_ratio:
                 log_event("INFO", "scanner",
                           f"reward_ratio_block YES {ticker}: entry={ya}c ratio={reward_ratio:.2f} min={min_reward_ratio}")
+                decision_row["decision"] = f"skip:reward_ratio_yes:{reward_ratio:.2f}"
+                log_decision(decision_row)
                 continue
+            decision_row["decision"] = "candidate_yes"
+            decision_row["entry_price_cents"] = ya
+            log_decision(decision_row)
             candidates.append({
                 "ticker":             ticker,
                 "side":               "yes",
@@ -328,14 +411,23 @@ def score_candidates(markets, noaa_client, metar_client, cfg):
             if no_ask > max_entry_no_cents:
                 log_event("INFO", "scanner",
                           f"no_price_block {ticker}: no_ask={no_ask}c max={max_entry_no_cents}c")
+                decision_row["decision"] = f"skip:no_price_block:{no_ask}"
+                log_decision(decision_row)
                 continue
             if not (min_entry_cents <= no_ask <= max_entry_cents):
+                decision_row["decision"] = f"skip:no_price_oob:{no_ask}"
+                log_decision(decision_row)
                 continue
             reward_ratio = (100 - no_ask) / no_ask if no_ask > 0 else 0
             if reward_ratio < min_reward_ratio:
                 log_event("INFO", "scanner",
                           f"reward_ratio_block NO {ticker}: entry={no_ask}c ratio={reward_ratio:.2f} min={min_reward_ratio}")
+                decision_row["decision"] = f"skip:reward_ratio_no:{reward_ratio:.2f}"
+                log_decision(decision_row)
                 continue
+            decision_row["decision"] = "candidate_no"
+            decision_row["entry_price_cents"] = no_ask
+            log_decision(decision_row)
             candidates.append({
                 "ticker":             ticker,
                 "side":               "no",
