@@ -48,7 +48,12 @@ def _already_in_pnl(ticker: str, today: str) -> bool:
 def _write_settlement_pnl(ticker: str, side: str, qty: int,
                           entry_cents: int, exit_cents: int,
                           reason: str = "settlement"):
-    """Write (or overwrite) a Kalshi-settled position to the pnl table."""
+    """Write (or overwrite) a Kalshi-settled position to the pnl table.
+
+    Also back-fills the corresponding positions row with exit_price_cents
+    and exit_reason so downstream queries (daily reports, calibrate_sigma,
+    etc.) can compute realized P&L straight from the positions table.
+    """
     realized = round((exit_cents - entry_cents) * qty / 100.0, 4)
     now = dt.datetime.utcnow().isoformat()
     today = dt.date.today().isoformat()
@@ -66,6 +71,22 @@ def _write_settlement_pnl(ticker: str, side: str, qty: int,
             """,
             (ticker, side, qty, entry_cents, exit_cents, realized, reason, now),
         )
+        # Back-fill the positions row. We only overwrite when the row is in a
+        # closed state and exit_price_cents is still NULL — never clobber an
+        # existing TP/SL exit price set by position_manager.
+        if reason == "settlement":
+            c.execute(
+                """
+                UPDATE positions
+                SET exit_price_cents = ?,
+                    exit_reason      = ?,
+                    status           = 'CLOSED'
+                WHERE ticker = ?
+                  AND status != 'OPEN'
+                  AND exit_price_cents IS NULL
+                """,
+                (exit_cents, reason, ticker),
+            )
 
 
 def _get_settlement_price(k, ticker: str, side: str) -> int | None:

@@ -92,6 +92,43 @@ cities:
     lat: 29.9844
     lon: -95.3414
     metar: KHOU
+  # ─ Added 2026-05-06: full Kalshi 18-city HIGHTEMP coverage ─
+  - code: ATL
+    lat: 33.6407
+    lon: -84.4277
+    metar: KATL
+  - code: PHX
+    lat: 33.4373
+    lon: -112.0078
+    metar: KPHX           # Phoenix Sky Harbor
+  - code: DC
+    lat: 38.8512
+    lon: -77.0402
+    metar: KDCA           # Reagan National (Kalshi DC settles here, NOT Dulles)
+  - code: LAS
+    lat: 36.0840
+    lon: -115.1537
+    metar: KLAS           # Harry Reid International
+  - code: SAT
+    lat: 29.5337
+    lon: -98.4698
+    metar: KSAT           # San Antonio International
+  - code: MIN
+    lat: 44.8848
+    lon: -93.2223
+    metar: KMSP           # Minneapolis-St Paul International
+  - code: DAL
+    lat: 32.8998
+    lon: -97.0403
+    metar: KDFW           # Dallas/Fort Worth International
+  - code: SF
+    lat: 37.6213
+    lon: -122.3790
+    metar: KSFO           # San Francisco International
+  - code: OKC
+    lat: 35.3931
+    lon: -97.6007
+    metar: KOKC           # Will Rogers World Airport
 
 markets:
   - HIGHTEMP
