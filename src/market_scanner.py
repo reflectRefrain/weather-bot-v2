@@ -1,5 +1,5 @@
 """Scanner v2: pulls Kalshi weather markets, persists strike_type, prices, target_date."""
-import datetime as dt, re, yaml
+import datetime as dt, math, re, yaml
 from zoneinfo import ZoneInfo
 from db import conn
 from kalshi_client import KalshiClient
@@ -293,6 +293,8 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
     lockin_max_price      = float(risk.get("lockin_max_price_cents", 92))
     lockin_max_dist_f     = float(risk.get("lockin_max_dist_f",      2.0))
     lockin_min_reward     = float(risk.get("lockin_min_reward_ratio", 0.10))
+    lockin_fee_buffer     = float(risk.get("lockin_fee_buffer",      0.02))
+    lockin_tie_buffer_f   = float(risk.get("lockin_tie_buffer_f",    1.0))
     tail_min_prob_no      = float(risk.get("tail_min_prob_no",       0.95))
     tail_no_price_min     = float(risk.get("tail_no_price_min",      15))
     tail_no_price_max     = float(risk.get("tail_no_price_max",      30))
@@ -465,13 +467,45 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
 
         # ----- LOCK-IN BOOK (YES) -----
         no_ask_for_market = 100 - yb if yb is not None else None
+
+        # Fee-aware mp_yes floor — Kalshi taker fee = ceil(0.07 * P * (1-P)).
+        # Net win at YES price ya: (1 - ya/100 - fee). Pure breakeven mp_yes
+        # = (ya/100) / (1 - fee). We require model_prob to clear breakeven by
+        # at least lockin_fee_buffer (default 0.02) on top of lockin_min_prob.
+        # This kills the negative-EV band at high yes_prices (86c-92c) without
+        # affecting cheaper entries where 0.85 already binds.
+        if ya is not None and ya > 0:
+            ya_dollars = ya / 100.0
+            _fee_yes = math.ceil(0.07 * ya_dollars * (1 - ya_dollars) * 100) / 100
+            mp_breakeven_yes = ya_dollars / max(1e-6, (1 - _fee_yes))
+            mp_required_yes = max(lockin_min_prob, mp_breakeven_yes + lockin_fee_buffer)
+        else:
+            mp_required_yes = lockin_min_prob
+
+        # Tie-buffer for Kalshi 'greater than' / 'less than' rules — these are
+        # STRICTLY greater/less. A miss landing exactly on the strike resolves
+        # against YES. Require the forecast to clear the strike by at least
+        # lockin_tie_buffer_f (default 1.0 deg F) on the same side as YES wins.
+        tie_safe = True
+        if strike_ref is not None:
+            if st == "greater":
+                # YES wins when actual > strike_low. Forecast must exceed strike
+                # by tie_buffer to absorb a 1F adverse miss without landing on tie.
+                tie_safe = (effective_forecast - strike_ref) >= lockin_tie_buffer_f
+            elif st == "less":
+                # YES wins when actual < strike_high.
+                tie_safe = (strike_ref - effective_forecast) >= lockin_tie_buffer_f
+            # 'between' covers an interior band — tie-on-edge less of a concern
+            # because a 1F miss off forecast typically still lands inside the band.
+
         if (
-            mp >= lockin_min_prob
+            mp >= mp_required_yes
             and ya is not None
             and ya <= lockin_max_price
             and ya >= min_entry_cents
             and strike_distance_f is not None
             and strike_distance_f <= lockin_max_dist_f
+            and tie_safe
         ):
             reward_ratio_lock = (100 - ya) / ya if ya > 0 else 0
             if reward_ratio_lock >= lockin_min_reward:
