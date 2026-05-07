@@ -40,6 +40,13 @@ risk:
   enable_legacy_edge_path: true
   legacy_half_size: true
 
+  # Tail-short tuning: minimum strike distance from forecast.
+  # Diagnostic showed only 15.9% of decisions had |strike-forecast| >= 4.0°F
+  # which combined with the narrow 15-30¢ NO price window emitted 0 trades
+  # in 24h. Nudging from 4.0 -> 3.5°F to unlock marginal candidates without
+  # widening the price window. Stay conservative: this is a single knob.
+  tail_min_dist_f: 3.5
+
 # Loop timing
 loop_sleep_seconds: 60             # Seconds between each cycle
 scan_every_n_cycles: 5            # Re-scan Kalshi markets every N cycles
