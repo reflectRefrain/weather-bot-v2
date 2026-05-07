@@ -303,6 +303,12 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
     # generic edge scanner below is bypassed (decisions still logged as skipped).
     enable_legacy_edge_path = bool(risk.get("enable_legacy_edge_path", False))
 
+    # Optional half-size mode for legacy candidates (Option B). When True, the
+    # executor halves max_per_ticker_usd / kelly_usd for any candidate tagged
+    # book_type='legacy', so legacy keeps generating data at reduced risk while
+    # we compare it head-to-head against the named books.
+    legacy_half_size = bool(risk.get("legacy_half_size", True))
+
     candidates = []
     for m in markets:
         var    = m.get("variable")
@@ -546,9 +552,9 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
                 continue
 
         # ----- LEGACY EITHER-SIDE EDGE PATH (fallback below) -----
-        # Gated off by default so attribution is clean: only the two named
-        # books (lockin + tail_short) trade. Flip risk.enable_legacy_edge_path
-        # to true in config.yaml to re-enable.
+        # Gated by config: when enable_legacy_edge_path is False, the path is
+        # bypassed entirely. When True, candidates are tagged book_type='legacy'
+        # so the executor can apply half-size (legacy_half_size flag).
         if not enable_legacy_edge_path:
             decision_row["decision"] = "skip:legacy_path_disabled"
             log_decision(decision_row)
@@ -592,6 +598,8 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
                 "price_cents":        ya,
                 "reward_ratio":       round(reward_ratio, 3),
                 "target_date":        m.get("target_date"),
+                "book_type":          "legacy",
+                "half_size":          legacy_half_size,
             })
 
         # YES had edge but failed price gate (too cheap or too expensive).
@@ -646,6 +654,8 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
                 "price_cents":        no_ask,
                 "reward_ratio":       round(reward_ratio, 3),
                 "target_date":        m.get("target_date"),
+                "book_type":          "legacy",
+                "half_size":          legacy_half_size,
             })
 
         # Neither YES nor NO had enough edge. Still log so we have the

@@ -219,6 +219,15 @@ def place_order(kalshi_client, candidate: dict, cfg: dict) -> dict:
         float(cfg["risk"].get("max_trade_usd", 2.0)),
         float(cfg["risk"].get("max_per_ticker_usd", 2.0)),
     )
+    # Half-size mode for legacy candidates (Option B). Tagged on the candidate
+    # by market_scanner.py so we can keep collecting data on the legacy strategy
+    # at reduced risk while comparing it to the named books.
+    book_type_tag = candidate.get("book_type")
+    half_size = bool(candidate.get("half_size", False))
+    if half_size:
+        kelly_usd = kelly_usd * 0.5
+        log_event("INFO", "executor",
+                  f"HALF_SIZE applied to {ticker} (book={book_type_tag}) -> kelly=${kelly_usd:.2f}")
     kelly_usd = max(kelly_usd, float(cfg["risk"].get("min_trade_usd", 1.00)))
 
     # Obs filter

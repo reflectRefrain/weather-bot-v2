@@ -33,10 +33,12 @@ risk:
   cancel_after_seconds: 120        # Cancel unfilled resting orders after 2 min
   trade_start_hour_local: 6        # (legacy) kept for compatibility
 
-  # Strategy gating: leave the two named books (lockin + tail_short) on, and
-  # turn the older generic edge scanner OFF so attribution is clean. Flip back
-  # to true after we've reviewed two weeks of telemetry and decided we want it.
-  enable_legacy_edge_path: false
+  # Strategy gating: two named books (lockin + tail_short) trade at full size.
+  # Legacy generic-edge scanner is also enabled but at HALF size (Option B):
+  # it keeps generating data so we can compare strategies head-to-head over
+  # two weeks, without doubling our risk during the experiment.
+  enable_legacy_edge_path: true
+  legacy_half_size: true
 
 # Loop timing
 loop_sleep_seconds: 60             # Seconds between each cycle
