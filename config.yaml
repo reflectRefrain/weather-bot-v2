@@ -47,6 +47,21 @@ risk:
   # widening the price window. Stay conservative: this is a single knob.
   tail_min_dist_f: 3.5
 
+  # Lockin fee-aware floor (PR #9, fee schedule verified Feb 2026):
+  # Kalshi taker fee = ceil(0.07 * P * (1-P)). At yes_price=92¢ the breakeven
+  # mp_yes is 0.929 — meaning a flat 0.85 threshold would pass negative-EV
+  # trades in the 86-92¢ band. Bot now requires:
+  #   mp_yes >= max(lockin_min_prob, breakeven + lockin_fee_buffer)
+  # 0.02 buffer = 2pp cushion above pure fee breakeven.
+  lockin_fee_buffer: 0.02
+
+  # Lockin tie-buffer for Kalshi 'strictly greater than' rule:
+  # NHIGH contract resolves NO if actual high == strike. Forecast must clear
+  # the strike by this many degrees in the YES-winning direction so a 1°F
+  # adverse miss does not land exactly on the strike line. 1.0°F is a soft
+  # buffer — adjust up if we see ties resolving against us.
+  lockin_tie_buffer_f: 1.0
+
 # Loop timing
 loop_sleep_seconds: 60             # Seconds between each cycle
 scan_every_n_cycles: 5            # Re-scan Kalshi markets every N cycles
