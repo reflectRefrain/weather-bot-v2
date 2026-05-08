@@ -1,0 +1,160 @@
+Loaded 6872 markets with morning quotes
+
+====================================================================================================
+1. PURE PRICE BANDS (5c slices)  — buy YES at this price band always
+====================================================================================================
+  YES @  0-4 c                                                 n= 2263 wr=  0.8% pnl=  -3529c  ev= -1.6c  ev%=-65.2%
+  YES @  5-9 c                                                 n= 1029 wr=  3.5% pnl=  -3310c  ev= -3.2c  ev%=-48.2%
+  YES @ 10-14c                                                 n=  571 wr=  9.8% pnl=  -1173c  ev= -2.1c  ev%=-17.5%
+  YES @ 15-19c                                                 n=  478 wr= 14.4% pnl=  -1259c  ev= -2.6c  ev%=-15.6%
+  YES @ 20-24c                                                 n=  433 wr= 18.7% pnl=  -1563c  ev= -3.6c  ev%=-16.5%
+  YES @ 25-29c                                                 n=  382 wr= 26.4% pnl=   -401c  ev= -1.0c  ev%= -3.9%
+  YES @ 30-34c                                                 n=  406 wr= 31.0% pnl=   -670c  ev= -1.7c  ev%= -5.1%
+  YES @ 35-39c                                                 n=  332 wr= 35.5% pnl=   -672c  ev= -2.0c  ev%= -5.5%
+  YES @ 40-44c                                                 n=  279 wr= 45.9% pnl=   +821c  ev= +2.9c  ev%= +7.0%  ★★ 
+  YES @ 45-49c                                                 n=  233 wr= 51.1% pnl=   +796c  ev= +3.4c  ev%= +7.3%  ★★ 
+  YES @ 50-54c                                                 n=  164 wr= 51.2% pnl=   -256c  ev= -1.6c  ev%= -3.0%
+  YES @ 55-59c                                                 n=   92 wr= 50.0% pnl=   -725c  ev= -7.9c  ev%=-13.9%
+  YES @ 60-64c                                                 n=   66 wr= 62.1% pnl=    -53c  ev= -0.8c  ev%= -1.3%
+  YES @ 65-69c                                                 n=   39 wr= 74.4% pnl=   +239c  ev= +6.1c  ev%= +9.2%  ★★ 
+  YES @ 70-74c                                                 n=   17 wr= 76.5% pnl=    +42c  ev= +2.5c  ev%= +3.4%
+  YES @ 75-79c                                                 n=   20 wr= 80.0% pnl=    +28c  ev= +1.4c  ev%= +1.8%
+  YES @ 80-84c                                                 n=   13 wr=100.0% pnl=   +210c  ev=+16.2c  ev%=+19.6%  ★★ 
+  YES @ 85-89c                                                 n=   12 wr=100.0% pnl=   +150c  ev=+12.5c  ev%=+14.5%  ★★ 
+  YES @ 90-94c                                                 n=   17 wr=100.0% pnl=   +112c  ev= +6.6c  ev%= +7.1%  ★★ 
+  YES @ 95-99c                                                 n=   10 wr=100.0% pnl=    +19c  ev= +1.9c  ev%= +2.0%
+
+PURE PRICE BANDS — buy NO at this price band always
+  NO  @  0-4 c                                                 n=   20 wr=  0.0% pnl=    -30c  ev= -1.5c  ev%=-100.0%
+  NO  @  5-9 c                                                 n=   12 wr=  0.0% pnl=    -94c  ev= -7.8c  ev%=-100.0%
+  NO  @ 10-14c                                                 n=   10 wr=  0.0% pnl=   -120c  ev=-12.0c  ev%=-100.0%
+  NO  @ 15-19c                                                 n=   16 wr=  0.0% pnl=   -270c  ev=-16.9c  ev%=-100.0%
+  NO  @ 20-24c                                                 n=   16 wr=  6.2% pnl=   -256c  ev=-16.0c  ev%=-72.3%
+  NO  @ 25-29c                                                 n=   18 wr= 22.2% pnl=    -94c  ev= -5.2c  ev%=-19.3%
+  NO  @ 30-34c                                                 n=   19 wr= 10.5% pnl=   -424c  ev=-22.3c  ev%=-68.4%
+  NO  @ 35-39c                                                 n=   42 wr= 28.6% pnl=   -368c  ev= -8.8c  ev%=-23.8%
+  NO  @ 40-44c                                                 n=   74 wr= 40.5% pnl=   -180c  ev= -2.4c  ev%= -5.8%
+  NO  @ 45-49c                                                 n=  112 wr= 48.2% pnl=    -26c  ev= -0.2c  ev%= -0.5%
+  NO  @ 50-54c                                                 n=  174 wr= 47.1% pnl=  -1046c  ev= -6.0c  ev%=-11.5%
+  NO  @ 55-59c                                                 n=  272 wr= 48.5% pnl=  -2595c  ev= -9.5c  ev%=-16.7%
+  NO  @ 60-64c                                                 n=  269 wr= 57.2% pnl=  -1608c  ev= -6.0c  ev%= -9.6%
+  NO  @ 65-69c                                                 n=  372 wr= 69.1% pnl=   +249c  ev= +0.7c  ev%= +1.0%
+  NO  @ 70-74c                                                 n=  380 wr= 71.3% pnl=   -814c  ev= -2.1c  ev%= -3.0%
+  NO  @ 75-79c                                                 n=  404 wr= 75.2% pnl=  -1309c  ev= -3.2c  ev%= -4.2%
+  NO  @ 80-84c                                                 n=  447 wr= 80.1% pnl=  -1430c  ev= -3.2c  ev%= -3.9%
+  NO  @ 85-89c                                                 n=  500 wr= 88.6% pnl=   +333c  ev= +0.7c  ev%= +0.8%
+  NO  @ 90-94c                                                 n=  743 wr= 93.0% pnl=    -93c  ev= -0.1c  ev%= -0.1%
+  NO  @ 95-99c                                                 n= 2225 wr= 98.1% pnl=   -989c  ev= -0.4c  ev%= -0.5%
+
+====================================================================================================
+2. STRIKE-DISTANCE FILTERED (use ground-truth distance — UPPER BOUND only)
+    'distance from realized TMAX' is post-hoc; this shows what's achievable
+    if you had a perfect forecast, not what's tradeable in real time.
+====================================================================================================
+
+YES @ 70-92c, by signed dist-from-strike (perfect-forecast simulation):
+    dist  -2 to  +0                                            n=   14 wr= 57.1% pnl=   -310c  ev=-22.1c  ev%=-28.3%
+    dist  +0 to  +2                                            n=   22 wr= 90.9% pnl=   +225c  ev=+10.2c  ev%=+12.9%  ★★ 
+    dist  +2 to  +4                                            n=   21 wr=100.0% pnl=   +387c  ev=+18.4c  ev%=+23.0%  ★★ 
+    dist  +4 to  +8                                            n=   28 wr=100.0% pnl=   +486c  ev=+17.4c  ev%=+21.4%  ★★ 
+    dist  +8 to +30                                            n=    3 wr=100.0% pnl=    +39c  ev=+13.0c  ev%=+15.2%  ★★ 
+    dist  -8 to  -2                                            n=    1 wr=  0.0% pnl=    -73c  ev=-73.0c  ev%=-100.0%
+    dist -30 to  -8                                            0 trades
+
+====================================================================================================
+3. STRIKE-TYPE SLICED
+====================================================================================================
+  greater    YES @  5-15c (deep tail long)                     n=  217 wr=  4.1% pnl=   -874c  ev= -4.0c  ev%=-49.5%
+  greater    YES @ 35-45c (slight underdog)                    n=   22 wr= 31.8% pnl=   -161c  ev= -7.3c  ev%=-19.0%
+  greater    YES @ 80-92c (high-conviction lockin)             n=    8 wr=100.0% pnl=   +105c  ev=+13.1c  ev%=+15.4%  ★★ 
+  greater    NO  @  5-15c (deep tail short)                    n=    5 wr=  0.0% pnl=    -55c  ev=-11.0c  ev%=-100.0%
+  greater    NO  @ 80-92c (high-conviction NO lockin)          n=  104 wr= 88.5% pnl=    +28c  ev= +0.3c  ev%= +0.3%
+
+  less       YES @  5-15c (deep tail long)                     n=  314 wr=  6.7% pnl=   -482c  ev= -1.5c  ev%=-18.8%
+  less       YES @ 35-45c (slight underdog)                    n=   25 wr= 60.0% pnl=   +470c  ev=+18.8c  ev%=+47.0%  ★★ 
+  less       YES @ 80-92c (high-conviction lockin)             n=   19 wr=100.0% pnl=   +244c  ev=+12.8c  ev%=+14.9%  ★★ 
+  less       NO  @  5-15c (deep tail short)                    n=   14 wr=  0.0% pnl=   -145c  ev=-10.4c  ev%=-100.0%
+  less       NO  @ 80-92c (high-conviction NO lockin)          n=  163 wr= 84.7% pnl=   -582c  ev= -3.6c  ev%= -4.1%
+
+  between    YES @  5-15c (deep tail long)                     n= 1174 wr=  6.5% pnl=  -3316c  ev= -2.8c  ev%=-30.6%
+  between    YES @ 35-45c (slight underdog)                    n=  625 wr= 41.4% pnl=   +525c  ev= +0.8c  ev%= +2.1%
+  between    YES @ 80-92c (high-conviction lockin)             n=    7 wr=100.0% pnl=    +80c  ev=+11.4c  ev%=+13.1%  ★★ 
+  between    NO  @  5-15c (deep tail short)                    n=    6 wr=  0.0% pnl=    -59c  ev= -9.8c  ev%=-100.0%
+  between    NO  @ 80-92c (high-conviction NO lockin)          n= 1069 wr= 87.2% pnl=   -200c  ev= -0.2c  ev%= -0.2%
+
+====================================================================================================
+4. SPREAD-FILTERED (only trade markets with TIGHT spreads <= 2c)
+====================================================================================================
+  YES @ 10-14c (tight spread <=2c)                             n=  408 wr=  8.3% pnl=  -1416c  ev= -3.5c  ev%=-29.6%
+  YES @ 15-19c (tight spread <=2c)                             n=  335 wr= 15.8% pnl=   -416c  ev= -1.2c  ev%= -7.4%
+  YES @ 20-24c (tight spread <=2c)                             n=  285 wr= 18.9% pnl=   -962c  ev= -3.4c  ev%=-15.4%
+  YES @ 25-29c (tight spread <=2c)                             n=  240 wr= 24.6% pnl=   -666c  ev= -2.8c  ev%=-10.3%
+  YES @ 30-34c (tight spread <=2c)                             n=  265 wr= 31.3% pnl=   -367c  ev= -1.4c  ev%= -4.3%
+  YES @ 35-39c (tight spread <=2c)                             n=  200 wr= 37.5% pnl=    -18c  ev= -0.1c  ev%= -0.2%
+  YES @ 40-44c (tight spread <=2c)                             n=  183 wr= 54.1% pnl=  +2016c  ev=+11.0c  ev%=+26.2%  ★★ 
+  YES @ 45-49c (tight spread <=2c)                             n=  156 wr= 52.6% pnl=   +760c  ev= +4.9c  ev%=+10.4%  ★★ 
+  YES @ 50-54c (tight spread <=2c)                             n=   99 wr= 56.6% pnl=   +366c  ev= +3.7c  ev%= +7.1%  ★★ 
+  YES @ 55-59c (tight spread <=2c)                             n=   56 wr= 55.4% pnl=   -150c  ev= -2.7c  ev%= -4.7%
+  YES @ 60-64c (tight spread <=2c)                             n=   39 wr= 66.7% pnl=   +142c  ev= +3.6c  ev%= +5.9%  ★★ 
+  YES @ 65-69c (tight spread <=2c)                             n=   24 wr= 83.3% pnl=   +368c  ev=+15.3c  ev%=+23.1%  ★★ 
+  YES @ 70-74c (tight spread <=2c)                             n=   10 wr= 70.0% pnl=    -38c  ev= -3.8c  ev%= -5.2%
+  YES @ 75-79c (tight spread <=2c)                             n=   10 wr= 80.0% pnl=    +14c  ev= +1.4c  ev%= +1.8%
+  YES @ 80-84c (tight spread <=2c)                             n=    8 wr=100.0% pnl=   +130c  ev=+16.2c  ev%=+19.8%  ★★ 
+  YES @ 85-89c (tight spread <=2c)                             n=    7 wr=100.0% pnl=    +89c  ev=+12.7c  ev%=+14.7%  ★★ 
+  YES @ 90-94c (tight spread <=2c)                             n=   10 wr=100.0% pnl=    +68c  ev= +6.8c  ev%= +7.4%  ★★ 
+
+  NO  @ 10-14c (tight spread <=2c)                             n=    6 wr=  0.0% pnl=    -69c  ev=-11.5c  ev%=-100.0%
+  NO  @ 15-19c (tight spread <=2c)                             n=   10 wr=  0.0% pnl=   -169c  ev=-16.9c  ev%=-100.0%
+  NO  @ 20-24c (tight spread <=2c)                             n=    9 wr= 11.1% pnl=   -104c  ev=-11.6c  ev%=-51.5%
+  NO  @ 25-29c (tight spread <=2c)                             n=   11 wr= 36.4% pnl=    +95c  ev= +8.6c  ev%=+32.0%  ★★ 
+  NO  @ 30-34c (tight spread <=2c)                             n=   11 wr=  0.0% pnl=   -358c  ev=-32.5c  ev%=-100.0%
+  NO  @ 35-39c (tight spread <=2c)                             n=   32 wr= 31.2% pnl=   -194c  ev= -6.1c  ev%=-16.5%
+  NO  @ 40-44c (tight spread <=2c)                             n=   50 wr= 36.0% pnl=   -329c  ev= -6.6c  ev%=-15.7%
+  NO  @ 45-49c (tight spread <=2c)                             n=   80 wr= 43.8% pnl=   -369c  ev= -4.6c  ev%= -9.7%
+  NO  @ 50-54c (tight spread <=2c)                             n=  116 wr= 45.7% pnl=   -861c  ev= -7.4c  ev%=-14.2%
+  NO  @ 55-59c (tight spread <=2c)                             n=  192 wr= 44.3% pnl=  -2611c  ev=-13.6c  ev%=-23.9%
+  NO  @ 60-64c (tight spread <=2c)                             n=  178 wr= 55.6% pnl=  -1346c  ev= -7.6c  ev%=-12.2%
+  NO  @ 65-69c (tight spread <=2c)                             n=  254 wr= 68.1% pnl=    -81c  ev= -0.3c  ev%= -0.5%
+  NO  @ 70-74c (tight spread <=2c)                             n=  233 wr= 72.5% pnl=   -213c  ev= -0.9c  ev%= -1.3%
+  NO  @ 75-79c (tight spread <=2c)                             n=  271 wr= 78.6% pnl=    +14c  ev= +0.1c  ev%= +0.1%
+  NO  @ 80-84c (tight spread <=2c)                             n=  302 wr= 81.5% pnl=   -563c  ev= -1.9c  ev%= -2.3%
+  NO  @ 85-89c (tight spread <=2c)                             n=  356 wr= 89.0% pnl=   +410c  ev= +1.2c  ev%= +1.3%
+  NO  @ 90-94c (tight spread <=2c)                             n=  565 wr= 94.3% pnl=   +674c  ev= +1.2c  ev%= +1.3%
+
+====================================================================================================
+5. EARLY vs LATE MORNING (first vs last candle in 11-18 UTC window)
+====================================================================================================
+
+EARLY morning quotes:
+    YES @ 15-19c (early)                                       n=  478 wr= 14.4% pnl=  -1259c  ev= -2.6c  ev%=-15.6%
+    YES @ 20-24c (early)                                       n=  433 wr= 18.7% pnl=  -1563c  ev= -3.6c  ev%=-16.5%
+    YES @ 25-29c (early)                                       n=  382 wr= 26.4% pnl=   -401c  ev= -1.0c  ev%= -3.9%
+    YES @ 30-34c (early)                                       n=  406 wr= 31.0% pnl=   -670c  ev= -1.7c  ev%= -5.1%
+    YES @ 40-44c (early)                                       n=  279 wr= 45.9% pnl=   +821c  ev= +2.9c  ev%= +7.0%  ★★ 
+    YES @ 50-54c (early)                                       n=  164 wr= 51.2% pnl=   -256c  ev= -1.6c  ev%= -3.0%
+    YES @ 65-69c (early)                                       n=   39 wr= 74.4% pnl=   +239c  ev= +6.1c  ev%= +9.2%  ★★ 
+    YES @ 70-74c (early)                                       n=   17 wr= 76.5% pnl=    +42c  ev= +2.5c  ev%= +3.4%
+    YES @ 75-79c (early)                                       n=   20 wr= 80.0% pnl=    +28c  ev= +1.4c  ev%= +1.8%
+    YES @ 80-84c (early)                                       n=   13 wr=100.0% pnl=   +210c  ev=+16.2c  ev%=+19.6%  ★★ 
+    YES @ 85-89c (early)                                       n=   12 wr=100.0% pnl=   +150c  ev=+12.5c  ev%=+14.5%  ★★ 
+    YES @ 90-94c (early)                                       n=   17 wr=100.0% pnl=   +112c  ev= +6.6c  ev%= +7.1%  ★★ 
+
+LATE morning quotes (just before settle, after some weather observed):
+    YES @ 15-19c (late)                                        n=  309 wr= 14.9% pnl=   -722c  ev= -2.3c  ev%=-13.7%
+    YES @ 20-24c (late)                                        n=  246 wr= 15.9% pnl=  -1586c  ev= -6.4c  ev%=-29.3%
+    YES @ 25-29c (late)                                        n=  233 wr= 24.9% pnl=   -629c  ev= -2.7c  ev%=-10.0%
+    YES @ 30-34c (late)                                        n=  213 wr= 33.8% pnl=   +247c  ev= +1.2c  ev%= +3.6%
+    YES @ 40-44c (late)                                        n=  192 wr= 43.8% pnl=   +178c  ev= +0.9c  ev%= +2.2%
+    YES @ 50-54c (late)                                        n=  179 wr= 43.6% pnl=  -1684c  ev= -9.4c  ev%=-18.1%
+    YES @ 65-69c (late)                                        n=  102 wr= 67.6% pnl=    -50c  ev= -0.5c  ev%= -0.7%
+    YES @ 70-74c (late)                                        n=   67 wr= 71.6% pnl=   -106c  ev= -1.6c  ev%= -2.2%
+    YES @ 75-79c (late)                                        n=   43 wr= 72.1% pnl=   -260c  ev= -6.0c  ev%= -7.9%
+    YES @ 80-84c (late)                                        n=   37 wr= 78.4% pnl=   -191c  ev= -5.2c  ev%= -6.3%
+    YES @ 85-89c (late)                                        n=   36 wr= 80.6% pnl=   -264c  ev= -7.3c  ev%= -8.4%
+    YES @ 90-94c (late)                                        n=   37 wr= 91.9% pnl=    -45c  ev= -1.2c  ev%= -1.3%
+
+====================================================================================================
+6. PRICE-MOVEMENT PATTERNS
+====================================================================================================
+  MOMENTUM YES @ 30-70c after +10c move                        n=  685 wr= 49.3% pnl=  -1903c  ev= -2.8c  ev%= -5.4%
+  FADE YES (buy at morning) on -10c later move                 n=  431 wr= 16.0% pnl= -10897c  ev=-25.3c  ev%=-61.7%

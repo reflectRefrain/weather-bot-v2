@@ -1,0 +1,53 @@
+
+=== TIGHT-SPREAD YES @ 40-49c ===
+n=339  wins=181  WR=53.4%  total_PnL=2776c  avg_PnL=+8.19c  EV=+18.6%
+
+Bootstrap 95% CI on per-trade P&L (10,000 resamples):
+  per-trade P&L 95% CI: [+2.88c, +13.33c]
+  fraction of bootstraps with positive EV: 99.9%
+
+WALK-FORWARD by month (no peeking):
+  month          n  wins     WR%     pnl      ev
+  2026-03      157    89   56.7%  +1784c  +11.4c
+  2026-04      145    72   49.7%   +666c   +4.6c
+  2026-05       37    20   54.1%   +326c   +8.8c
+
+By strike_type:
+  type             n  wins     WR%     pnl      ev
+  between        323   172   53.3%  +2598c   +8.0c
+  greater          7     3   42.9%    -11c   -1.6c
+  less             9     6   66.7%   +189c  +21.0c
+
+By city (sorted by total P&L):
+  city      n wins     WR%     pnl      ev
+  AUS      34   20   58.8%   +470c  +13.8c
+  HOU      23   15   65.2%   +439c  +19.1c
+  PHX      22   14   63.6%   +390c  +17.7c
+  DAL      18   12   66.7%   +384c  +21.3c
+  NYC      20   12   60.0%   +286c  +14.3c
+  PHIL     21   12   57.1%   +256c  +12.2c
+  LAS      25   14   56.0%   +253c  +10.1c
+  SAT      13    8   61.5%   +200c  +15.4c
+  LAX      23   12   52.2%   +162c   +7.0c
+  MIN      20   10   50.0%   +114c   +5.7c
+  SF       23   11   47.8%    +64c   +2.8c
+  BOS       8    4   50.0%    +43c   +5.4c
+  MIA      21   10   47.6%    +42c   +2.0c
+  DEN      17    8   47.1%    +36c   +2.1c
+  OKC      13    6   46.2%    +13c   +1.0c
+  CHI       7    2   28.6%   -112c  -16.0c
+  DC       10    3   30.0%   -126c  -12.6c
+  ATL      21    8   38.1%   -138c   -6.6c
+
+=== HONEST CAVEATS ===
+This finding has the following potential confounders:
+ 1. SAMPLE: 339 trades is meaningful but not huge. Bootstrap CI tells you the range.
+ 2. SLIPPAGE: We're assuming you can fill at the close-of-candle yes_ask. In reality,
+    when YES drops to 40c with tight spread, the resting offer may evaporate.
+ 3. SURVIVORSHIP: We only see markets that traded — markets with no morning volume
+    at 40-49c never appear, but might be where the real mispricing lives.
+ 4. NO MODEL: This says the price band has +EV — but in real-time the bot still
+    needs a rule for WHICH 40-49c market to enter. Indiscriminate entry on every
+    40-49c market means LOTS of trades — sizing matters.
+ 5. WINDOW: Mar-May 2026 only. Different seasons have different dynamics —
+    summer extremes, winter swings, transition periods all behave differently.
