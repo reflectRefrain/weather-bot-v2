@@ -156,34 +156,48 @@ def fmt_strategy() -> str:
         "Max positions : 5 at a time\n"
         "Max per trade : $6.00\n"
         f"{SEP}\n"
-        "Cities: NYC CHI MIA LAX DEN BOS AUS PHIL HOU\n"
+        "Cities: 18 (NYC CHI MIA LAX DEN BOS AUS PHIL HOU ATL PHX DC LAS SAT MIN DAL SF OKC)\n"
+        "Lockin floor : fee-aware (PR #9) | Tie buffer: 1°F\n"
         "Markets: High Temp + Low Temp (same-day only)"
     )
+
+
+def _pnl_window(c, hours: int) -> tuple[int, int, int, float]:
+    """Return (n_closed, wins, losses, net_pnl) over the last `hours` window."""
+    rows = c.execute(
+        "SELECT realized_usd FROM pnl WHERE closed_at > datetime('now', ?)",
+        (f'-{hours} hours',)
+    ).fetchall()
+    wins = sum(1 for r in rows if r[0] > 0)
+    losses = sum(1 for r in rows if r[0] < 0)
+    net = sum(r[0] for r in rows)
+    return len(rows), wins, losses, net
 
 
 def fmt_daily_summary() -> str:
     today = dt.date.today().isoformat()
     with conn() as c:
-        closed = c.execute(
-            "SELECT COUNT(*), COALESCE(SUM(realized_usd),0) FROM pnl WHERE date(closed_at)=?",
-            (today,)
-        ).fetchone()
-        wins = c.execute(
-            "SELECT COUNT(*) FROM pnl WHERE date(closed_at)=? AND realized_usd > 0",
-            (today,)
-        ).fetchone()[0]
-    n_closed = closed[0]
-    total_pnl = closed[1]
+        n24, w24, l24, p24 = _pnl_window(c, 24)
+        n7,  w7,  l7,  p7  = _pnl_window(c, 168)
+        n_all = c.execute("SELECT COUNT(*), COALESCE(SUM(realized_usd),0) FROM pnl").fetchone()
+        w_all = c.execute("SELECT COUNT(*) FROM pnl WHERE realized_usd > 0").fetchone()[0]
     n_open = len(open_positions())
-    win_rate = f"{wins}/{n_closed}" if n_closed else "0/0"
-    icon = "📈" if total_pnl >= 0 else "📉"
+
+    def _line(label, n, w, l, pnl):
+        if n == 0:
+            return f"  {label}: no settled trades"
+        wr = w / max(1, w + l) * 100
+        icon = "📈" if pnl >= 0 else "📉"
+        return f"  {label}: {n} closed | {w}W/{l}L | {wr:.0f}% | {icon} ${pnl:+.2f}"
+
+    icon_all = "📈" if n_all[1] >= 0 else "📉"
     return (
         f"🌅 Daily Summary — {today}\n"
         f"{SEP}\n"
-        f"Trades closed : {n_closed}\n"
-        f"Win/Loss      : {win_rate}\n"
-        f"{icon} Realized PnL : ${total_pnl:+.2f}\n"
-        f"Open positions: {n_open}\n"
+        f"{_line('Last 24h', n24, w24, l24, p24)}\n"
+        f"{_line('Last 7d ', n7,  w7,  l7,  p7)}\n"
+        f"  Lifetime: {n_all[0]} closed | {w_all}W/{n_all[0]-w_all}L | {icon_all} ${n_all[1]:+.2f}\n"
+        f"  Open positions: {n_open}\n"
         f"{SEP}\n"
         "Send /pnl for trade breakdown\n"
         "Send /balance for live balance"
