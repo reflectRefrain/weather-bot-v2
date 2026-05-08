@@ -10,50 +10,69 @@ mode: live
 # Bankroll (updated May 2 2026 — $200 deposit)
 bankroll_usd: 200.00
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 2026-05-08 MORNING-WINDOW VALIDATION CONFIG
+# Backtest at the prior afternoon window (14:30-16:30 LOCAL) showed every
+# strategy unprofitable. The morning window (4-9am LOCAL) showed +18-23% EV
+# for mid_band and +4-9% EV for lockin_yes across 90 days/18 cities.
+# We are running BOTH books at $1/contract for 30 days as live out-of-sample
+# validation. tail_short, tail_long, lockin_no, and legacy are all DISABLED.
+# ──────────────────────────────────────────────────────────────────────────────
+
 # Risk controls
 risk:
-  daily_loss_limit_pct: 0.06       # Kill bot if down 6% in one day (~$12.00)
+  daily_loss_limit_pct: 0.025      # Kill bot if down 2.5% in one day (=$5 on $200)
+                                   # Validation cap: 5 losing $1 trades before halt.
   max_open_positions: 5            # Max concurrent open positions
-  min_edge_cents: 6                # Min model edge over market mid (cents)
+  min_edge_cents: 6                # (legacy path) min model edge over mid — unused
   max_spread_cents: 15             # Skip markets with spread wider than this
   min_entry_cents: 20              # Skip cheap low-conviction contracts
   max_entry_cents: 90              # Don't buy contracts more expensive than 90c
-  max_entry_no_cents: 75           # VETERAN RULE: never pay more than 75c for a NO contract
-                                   # Buying NO at 80-90c risks $4 to make $0.30 — one loss wipes 8 wins
-  min_reward_ratio: 0.25           # VETERAN RULE: must stand to profit >= 25c per $1 risked
-                                   # e.g. buying at 80c = 20c profit / 80c risk = 0.25 (borderline)
-                                   # buying at 89c = 11c / 89c = 0.12 (REJECTED)
-  min_model_prob: 0.80             # Lock-in strategy: only trade when model is >=80% confident
+  max_entry_no_cents: 75           # never pay more than 75c for a NO contract
+  min_reward_ratio: 0.25           # legacy path — unused while legacy disabled
+  min_model_prob: 0.80             # Lock-in only: model >=80% confident
   kelly_fraction: 0.15             # Conservative Kelly fraction
   min_trade_usd: 1.00              # Minimum order size in dollars
-  max_trade_usd: 3.00              # Maximum order size per trade
-  max_per_ticker_usd: 3.00         # Hard cap per ticker
-  max_contracts: 15                # Hard cap on contracts per trade
+  max_trade_usd: 1.00              # VALIDATION CAP: $1/contract
+  max_per_ticker_usd: 1.00         # VALIDATION CAP: $1/contract
+  max_contracts: 2                 # Hard cap — with $1 budget and 40-49c entries,
+                                   # 1-2 contracts is the realistic max anyway.
   min_balance_usd: 50.00           # Pause if balance drops below this (25% drawdown)
   cancel_after_seconds: 120        # Cancel unfilled resting orders after 2 min
   trade_start_hour_local: 6        # (legacy) kept for compatibility
 
-  # Strategy gating: two named books (lockin + tail_short) trade at full size.
-  # Legacy generic-edge scanner is also enabled but at HALF size (Option B):
-  # it keeps generating data so we can compare strategies head-to-head over
-  # two weeks, without doubling our risk during the experiment.
-  enable_legacy_edge_path: true
-  legacy_half_size: true
+  # ───────────────────────────────────────────────────────────────────────
+  # STRATEGY GATING (morning-window PR)
+  # Only mid_band + lockin_yes fire. Everything else off.
+  # ───────────────────────────────────────────────────────────────────────
+  enable_legacy_edge_path: false   # OFF — backtest -8% EV at every band
+  legacy_half_size: true           # (no-op while legacy is off)
 
-  # Tail-short tuning: minimum strike distance from forecast.
-  # Diagnostic showed only 15.9% of decisions had |strike-forecast| >= 4.0°F
-  # which combined with the narrow 15-30¢ NO price window emitted 0 trades
-  # in 24h. Nudging from 4.0 -> 3.5°F to unlock marginal candidates without
-  # widening the price window. Stay conservative: this is a single knob.
-  tail_min_dist_f: 3.5
+  # mid_band book: YES @ 40-49c, spread ≤ 2c, between-strikes, skip CHI/DC/ATL
+  mid_band_enabled: true
+  mid_band_price_min: 40
+  mid_band_price_max: 49
+  mid_band_max_spread_cents: 2
+  mid_band_excluded_cities: ["CHI", "DC", "ATL"]
 
-  # Lockin fee-aware floor (PR #9, fee schedule verified Feb 2026):
+  # tail_short: DISABLED. Backtest -65% EV in morning, -15% in afternoon.
+  # Set tail_min_prob_no to 1.01 (impossible) so the gate never opens.
+  tail_min_prob_no: 1.01
+  tail_min_dist_f: 3.5             # legacy parameter, kept for compatibility
+
+  # Lockin fee-aware floor (PR #9, fee schedule verified Feb 2026).
   # Kalshi taker fee = ceil(0.07 * P * (1-P)). At yes_price=92¢ the breakeven
   # mp_yes is 0.929 — meaning a flat 0.85 threshold would pass negative-EV
   # trades in the 86-92¢ band. Bot now requires:
   #   mp_yes >= max(lockin_min_prob, breakeven + lockin_fee_buffer)
   # 0.02 buffer = 2pp cushion above pure fee breakeven.
   lockin_fee_buffer: 0.02
+
+  # During morning-window validation, lockin_yes is the ONLY non-mid_band
+  # book firing. Force lockin_no off by capping NO-side entries to a price
+  # range no real book can hit:
+  # NOTE: lockin currently emits YES only (book_type='lockin' → side='yes').
+  # No additional gate needed; this comment documents the intent.
 
   # Lockin tie-buffer for Kalshi 'strictly greater than' rule:
   # NHIGH contract resolves NO if actual high == strike. Forecast must clear
