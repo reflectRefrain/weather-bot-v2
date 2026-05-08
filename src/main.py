@@ -24,9 +24,15 @@ def log(msg):
     print(f"[{ts}] {msg}", flush=True)
 
 def is_trading_hours() -> bool:
+    """Outer scan-loop gate. Per-city/per-horizon entry windows are enforced
+    inside market_scanner.is_valid_entry_time(); this gate just ensures the
+    scanner runs whenever ANY active US city could be inside its 4-9am local
+    window. Earliest: 4am ET (Eastern). Latest: 9am PT = 12pm ET. So we open
+    the gate from 4am ET through 12pm ET (08:00-16:00 UTC ignoring DST; we
+    use ET hour to stay DST-correct)."""
     from zoneinfo import ZoneInfo
     hour = dt.datetime.now(ZoneInfo("America/New_York")).hour
-    return 6 <= hour < 21
+    return 4 <= hour < 12
 
 def init_day_balance(kalshi_client):
     today = dt.date.today().isoformat()
@@ -110,7 +116,7 @@ async def trader_loop():
             cancel_stale_orders(k, cfg)
 
             if not is_trading_hours():
-                log("Outside trading hours (6AM-9PM ET) - managed positions only; no new entries")
+                log("Outside scan window (4AM-12PM ET) - managed positions only; no new entries")
                 await asyncio.sleep(sleep_sec)
                 continue
 
