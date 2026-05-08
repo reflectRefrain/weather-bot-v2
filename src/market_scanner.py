@@ -4,6 +4,11 @@ from zoneinfo import ZoneInfo
 from db import conn
 from kalshi_client import KalshiClient
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Full 18-city Kalshi HIGHTEMP coverage — added by morning-window PR.
+#  Verified series tickers come from backtest/series_map.py (manual probe of
+#  the Kalshi public series endpoint).
+# ─────────────────────────────────────────────────────────────────────────────
 CITY_COORDS = {
     "NYC":  (40.7789, -73.9692),
     "LAX":  (33.9425, -118.4081),
@@ -14,6 +19,16 @@ CITY_COORDS = {
     "PHIL": (39.8729, -75.2437),
     "BOS":  (42.3606, -71.0106),
     "HOU":  (29.9844, -95.3414),
+    # ─ added 2026-05-08 in morning-window PR ─
+    "ATL":  (33.6407, -84.4277),
+    "PHX":  (33.4373, -112.0078),
+    "DC":   (38.8512, -77.0402),    # KDCA — Reagan, NOT Dulles
+    "LAS":  (36.0840, -115.1537),
+    "SAT":  (29.5337, -98.4698),
+    "MIN":  (44.8848, -93.2223),
+    "DAL":  (32.8998, -97.0403),    # KDFW
+    "SF":   (37.6213, -122.3790),   # KSFO
+    "OKC":  (35.3931, -97.6007),
 }
 
 CITY_METAR = {
@@ -26,6 +41,15 @@ CITY_METAR = {
     "PHIL": "KPHL",
     "BOS":  "KBOS",
     "HOU":  "KHOU",
+    "ATL":  "KATL",
+    "PHX":  "KPHX",
+    "DC":   "KDCA",
+    "LAS":  "KLAS",
+    "SAT":  "KSAT",
+    "MIN":  "KMSP",
+    "DAL":  "KDFW",
+    "SF":   "KSFO",
+    "OKC":  "KOKC",
 }
 
 CITY_TZ = {
@@ -33,23 +57,44 @@ CITY_TZ = {
     "BOS":  "America/New_York",
     "PHIL": "America/New_York",
     "MIA":  "America/New_York",
+    "DC":   "America/New_York",
+    "ATL":  "America/New_York",
     "CHI":  "America/Chicago",
     "HOU":  "America/Chicago",
     "AUS":  "America/Chicago",
+    "DAL":  "America/Chicago",
+    "SAT":  "America/Chicago",
+    "MIN":  "America/Chicago",
+    "OKC":  "America/Chicago",
     "DEN":  "America/Denver",
+    "PHX":  "America/Phoenix",      # MST, no DST
     "LAX":  "America/Los_Angeles",
+    "LAS":  "America/Los_Angeles",
+    "SF":   "America/Los_Angeles",
 }
 
+# Maps our internal city code -> the Kalshi series tail used to build series
+# tickers via VAR_PREFIX. Verified May 2026 — 9 of these use the new KXHIGHT*
+# prefix family rather than the original KXHIGH* family.
 CITY_CODES = {
     "NYC":  ["NY", "NYC"],
     "LAX":  ["LAX", "LA"],
     "CHI":  ["CHI"],
     "MIA":  ["MIA"],
     "DEN":  ["DEN"],
-    "AUS":  ["AUS"],
-    "PHIL": ["PHIL"],
-    "BOS":  ["BOS"],
-    "HOU":  ["HOU"],
+    "AUS":  ["AUS"],          # KXHIGHAUS
+    "PHIL": ["PHIL"],         # KXHIGHPHIL
+    "BOS":  ["TBOS"],         # KXHIGHTBOS
+    "HOU":  ["THOU"],         # KXHIGHTHOU
+    "ATL":  ["TATL"],         # KXHIGHTATL
+    "PHX":  ["TPHX"],         # KXHIGHTPHX
+    "DC":   ["TDC"],          # KXHIGHTDC
+    "LAS":  ["TLV"],          # KXHIGHTLV  (Las Vegas → LV)
+    "SAT":  ["TSATX"],        # KXHIGHTSATX (San Antonio → SATX)
+    "MIN":  ["TMIN"],         # KXHIGHTMIN
+    "DAL":  ["TDAL"],         # KXHIGHTDAL
+    "SF":   ["TSFO"],         # KXHIGHTSFO
+    "OKC":  ["TOKC"],         # KXHIGHTOKC
 }
 
 VAR_PREFIX = {
@@ -65,8 +110,15 @@ MONTHS = {m: i + 1 for i, m in enumerate(
 )}
 
 # ── Entry time windows (local hour, inclusive) ────────────────────────────────
-SAME_DAY_ENTRY_START = 14.5  # 2:30 PM local — obs anchor strongest after 14:30
-SAME_DAY_ENTRY_END   = 16.5  # 4:30 PM local — high usually in; pure lock-in window
+# 2026-05-08: Morning-window PR. The afternoon backtest at 14:30-16:30 LOCAL
+# (the prior window) showed every strategy unprofitable — mid_band at -39% EV,
+# lockin_yes at -4% EV. The only window with measured positive EV across 90 days
+# / 18 cities was 4:00-9:00 LOCAL: mid_band peaks at +19% EV (hour 4) and
+# averages +6-12% EV across hours 4-8; lockin_yes is +4-9% EV across hours 4-10.
+# By 9am the edge has decayed and goes negative through the afternoon as the
+# day's high becomes increasingly observable.
+SAME_DAY_ENTRY_START = 4.0   # 4:00 AM local — peak edge for both books
+SAME_DAY_ENTRY_END   = 9.0   # 9:00 AM local — edge has decayed to ~0 by then
 NEXT_DAY_ENTRY_START = 6
 NEXT_DAY_ENTRY_END   = 10
 
@@ -301,6 +353,17 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
     tail_min_dist_f       = float(risk.get("tail_min_dist_f",        4.0))
     tail_min_reward       = float(risk.get("tail_min_reward_ratio",  1.5))
 
+    # MID_BAND BOOK — added by morning-window PR (2026-05-08).
+    # Pure price-driven entry, no model dependency. Backtest finding:
+    # YES @ 40-49¢, spread ≤ 2¢, between-strikes, HIGHTEMP only, skip CHI/DC/ATL
+    # produced +18-23% EV across 90 days / 246 trades when entered in the
+    # 4-9am LOCAL window. Tightly bounded — do not loosen without re-validating.
+    mid_band_enabled       = bool(risk.get("mid_band_enabled",            False))
+    mid_band_price_min     = float(risk.get("mid_band_price_min",         40))
+    mid_band_price_max     = float(risk.get("mid_band_price_max",         49))
+    mid_band_max_spread    = float(risk.get("mid_band_max_spread_cents",  2))
+    mid_band_excluded      = set(risk.get("mid_band_excluded_cities",     ["CHI", "DC", "ATL"]))
+
     # Strategy gating — when False, only the two named books fire and the
     # generic edge scanner below is bypassed (decisions still logged as skipped).
     enable_legacy_edge_path = bool(risk.get("enable_legacy_edge_path", False))
@@ -464,6 +527,51 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
             strike_distance_f = abs(effective_forecast - strike_ref) if strike_ref is not None else None
         else:
             strike_distance_f = None
+
+        # ----- MID_BAND BOOK (YES @ 40-49¢) -----
+        # Fires before lockin/tail. Price band is below lockin's 70-92¢ floor,
+        # so this block cannot collide with a lockin candidate on the same
+        # ticker. If mid_band fires we `continue` to prevent the legacy path
+        # from also emitting on the same market.
+        if (
+            mid_band_enabled
+            and var == "HIGHTEMP"
+            and st == "between"
+            and city not in mid_band_excluded
+            and ya is not None and yb is not None
+            and mid_band_price_min <= ya <= mid_band_price_max
+            and (ya - yb) <= mid_band_max_spread
+        ):
+            mb_row = dict(decision_row)
+            mb_row["decision"] = "candidate_yes"
+            mb_row["book_type"] = "mid_band"
+            mb_row["entry_price_cents"] = ya
+            log_decision(mb_row)
+            candidates.append({
+                "ticker":             ticker,
+                "side":               "yes",
+                "book_type":          "mid_band",
+                "variable":           var,
+                "city":               city,
+                "horizon":            hz,
+                "strike_type":        st,
+                "strike_low":         lo,
+                "strike_high":        hi,
+                "yes_bid":            yb,
+                "yes_ask":            ya,
+                "model_prob":         mp,           # logged for telemetry only
+                "market_mid":         mid,
+                "edge_cents":         round(edge_yes, 2),
+                "forecast_f":         forecast_f,
+                "effective_forecast": effective_forecast,
+                "obs_f":              obs_f,
+                "sigma_used":         round(sigma, 2) if sigma is not None else None,
+                "price_cents":        ya,
+                "reward_ratio":       round(((100 - ya) / ya) if ya > 0 else 0, 3),
+                "target_date":        m.get("target_date"),
+                "strike_distance_f":  round(strike_distance_f, 2) if strike_distance_f is not None else None,
+            })
+            continue
 
         # ----- LOCK-IN BOOK (YES) -----
         no_ask_for_market = 100 - yb if yb is not None else None
