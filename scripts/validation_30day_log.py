@@ -2,17 +2,17 @@
 """
 30-day validation log for the morning-window mid_band + lockin_yes deployment.
 
-Snapshots daily into a CSV so we have clean out-of-sample data when the
-30-day window closes:
-  - per book_type: trades, fills, wins, losses, gross P&L, fee-net P&L
-  - per local_hour bucket
-  - per city
-  - daily kill-switch trips
-  - cumulative win rate vs backtest expectation (mid_band 56%, lockin 87%)
+Daily snapshot to a CSV so we have clean out-of-sample data when the 30-day
+window closes.
 
-Run from the VPS via cron once a day (e.g. 23:55 local) or invoke ad-hoc:
-    python3 scripts/validation_30day_log.py
-Output: /app/logs/validation_30day.csv (append-only)
+Schema notes (these matter — earlier version of this script had wrong assumptions):
+  - DB lives at /app/data/bot.db (not /app/db/wb2.db)
+  - The `positions` table has NO `book_type` column. To get book_type per
+    fill we join through `model_decisions` on ticker (latest candidate row
+    per ticker).
+  - The `positions` table has NO `realized_pnl_cents` and NO `closed_at`.
+    Realized P&L lives in the `pnl` table as `realized_usd` with `closed_at`.
+  - State table key for kill switch is `kill_switch_today` per src/risk.py.
 """
 import csv
 import datetime as dt
@@ -20,7 +20,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-DB_PATH  = os.environ.get("WB2_DB",  "/app/db/wb2.db")
+DB_PATH  = os.environ.get("WB2_DB",  "/app/data/bot.db")
 LOG_PATH = os.environ.get("WB2_VAL_LOG", "/app/logs/validation_30day.csv")
 START    = dt.date(2026, 5, 8)  # morning-window deployment date
 
@@ -36,23 +36,40 @@ FIELDS = [
     "wr_today_lockin",
     "pnl_today_usd",
     "pnl_cumulative_usd",
-    "free_cash_usd",
     "kill_switch_state",
     "open_positions",
     "wr_lifetime_mid_band",
     "wr_lifetime_lockin",
     "trades_lifetime_mid_band",
     "trades_lifetime_lockin",
-    "expected_wr_mid_band_56pct",
-    "expected_wr_lockin_87pct",
+    "expected_wr_mid_band",
+    "expected_wr_lockin",
     "delta_mid_band_pp",
     "delta_lockin_pp",
 ]
+
+# Backtest expectations (mid_band 46-48% WR, lockin 75-87% WR per FINDINGS.md).
+# Use the conservative-end gates the user committed to as the validation
+# threshold: mid_band >=50%, lockin >=75%.
+EXPECTED_WR_MID    = 50.0
+EXPECTED_WR_LOCKIN = 75.0
 
 
 def fetch_one(c, sql, *args):
     r = c.execute(sql, args).fetchone()
     return r[0] if r else None
+
+
+def book_type_for(c, ticker):
+    """Latest candidate book_type for a given ticker from model_decisions.
+    Returns None if not found."""
+    row = c.execute(
+        """SELECT book_type FROM model_decisions
+           WHERE ticker = ? AND book_type IS NOT NULL
+           ORDER BY ts DESC LIMIT 1""",
+        (ticker,),
+    ).fetchone()
+    return row[0] if row else None
 
 
 def main():
@@ -70,105 +87,80 @@ def main():
     c.row_factory = sqlite3.Row
 
     today_iso = today.isoformat()
+    start_iso = START.isoformat()
 
-    def trades_count(book_type, since_iso):
-        return fetch_one(
-            c,
-            """SELECT COUNT(*) FROM positions
-               WHERE book_type = ? AND substr(opened_at, 1, 10) >= ?""",
-            book_type, since_iso,
-        ) or 0
+    # All settled trades since deployment date.
+    settled_rows = c.execute(
+        """SELECT ticker, side, qty, entry_cents, exit_cents,
+                  realized_usd, closed_at
+           FROM pnl
+           WHERE substr(closed_at, 1, 10) >= ?""",
+        (start_iso,),
+    ).fetchall()
 
-    def wins_count(book_type, since_iso):
-        return fetch_one(
-            c,
-            """SELECT COUNT(*) FROM positions
-               WHERE book_type = ? AND status = 'CLOSED'
-                 AND substr(closed_at, 1, 10) >= ?
-                 AND realized_pnl_cents > 0""",
-            book_type, since_iso,
-        ) or 0
+    settled = []
+    for r in settled_rows:
+        d = dict(r)
+        d["book_type"] = book_type_for(c, d["ticker"]) or "unknown"
+        settled.append(d)
 
-    def lifetime_trades(book_type):
-        return fetch_one(
-            c,
-            "SELECT COUNT(*) FROM positions WHERE book_type = ? AND status = 'CLOSED'",
-            book_type,
-        ) or 0
+    def is_today(r):
+        return (r["closed_at"] or "")[:10] == today_iso
 
-    def lifetime_wins(book_type):
-        return fetch_one(
-            c,
-            """SELECT COUNT(*) FROM positions WHERE book_type = ? AND status = 'CLOSED'
-               AND realized_pnl_cents > 0""",
-            book_type,
-        ) or 0
+    def is_win(r):
+        return (r["realized_usd"] or 0) > 0
 
-    def pnl_today_cents():
-        return fetch_one(
-            c,
-            """SELECT COALESCE(SUM(realized_pnl_cents), 0) FROM positions
-               WHERE status = 'CLOSED' AND substr(closed_at, 1, 10) = ?""",
-            today_iso,
-        ) or 0
+    today_settled = [r for r in settled if is_today(r)]
+    today_mid     = [r for r in today_settled if r["book_type"] == "mid_band"]
+    today_lock    = [r for r in today_settled if r["book_type"] == "lockin"]
 
-    def pnl_cumulative_cents():
-        return fetch_one(
-            c,
-            """SELECT COALESCE(SUM(realized_pnl_cents), 0) FROM positions
-               WHERE status = 'CLOSED' AND substr(closed_at, 1, 10) >= ?""",
-            START.isoformat(),
-        ) or 0
+    life_mid  = [r for r in settled if r["book_type"] == "mid_band"]
+    life_lock = [r for r in settled if r["book_type"] == "lockin"]
 
-    def open_positions_count():
-        return fetch_one(
-            c, "SELECT COUNT(*) FROM positions WHERE status = 'OPEN'"
-        ) or 0
+    def wr_pct(rows):
+        if not rows:
+            return None
+        wins = sum(1 for r in rows if is_win(r))
+        return round(100 * wins / len(rows), 1)
 
-    def state(key):
-        v = fetch_one(c, "SELECT value FROM state WHERE key = ?", key)
-        return v or ""
+    pnl_today  = round(sum(r["realized_usd"] or 0 for r in today_settled), 2)
+    pnl_cum    = round(sum(r["realized_usd"] or 0 for r in settled), 2)
 
-    today_mid   = trades_count("mid_band", today_iso)
-    today_lock  = trades_count("lockin",   today_iso)
-    today_wins_mid  = wins_count("mid_band", today_iso)
-    today_wins_lock = wins_count("lockin",   today_iso)
-    life_mid_t = lifetime_trades("mid_band")
-    life_lock_t = lifetime_trades("lockin")
-    life_mid_w = lifetime_wins("mid_band")
-    life_lock_w = lifetime_wins("lockin")
+    # Open positions (current snapshot)
+    open_count = fetch_one(c, "SELECT COUNT(*) FROM positions WHERE status = 'OPEN'") or 0
 
-    def safe_pct(num, den):
-        return round(100 * num / den, 1) if den else None
+    # Kill switch state — read whatever key exists; fall back to "OFF".
+    ks = fetch_one(c, "SELECT value FROM state WHERE key = 'kill_switch_today'") \
+         or fetch_one(c, "SELECT value FROM state WHERE key = 'kill_switch'") \
+         or "OFF"
 
-    wr_mid_today = safe_pct(today_wins_mid, today_mid)
-    wr_lock_today = safe_pct(today_wins_lock, today_lock)
-    wr_mid_life = safe_pct(life_mid_w, life_mid_t)
-    wr_lock_life = safe_pct(life_lock_w, life_lock_t)
+    wr_mid_life  = wr_pct(life_mid)
+    wr_lock_life = wr_pct(life_lock)
 
     row = {
         "as_of": dt.datetime.now().isoformat(timespec="seconds"),
         "day_index": day_idx,
-        "trades_today_total": today_mid + today_lock,
-        "trades_today_mid_band": today_mid,
-        "trades_today_lockin": today_lock,
-        "wins_today_mid_band": today_wins_mid,
-        "wins_today_lockin": today_wins_lock,
-        "wr_today_mid_band": wr_mid_today,
-        "wr_today_lockin": wr_lock_today,
-        "pnl_today_usd": round(pnl_today_cents() / 100.0, 2),
-        "pnl_cumulative_usd": round(pnl_cumulative_cents() / 100.0, 2),
-        "free_cash_usd": "",  # filled by external balance sync if available
-        "kill_switch_state": state("kill_switch") or "OFF",
-        "open_positions": open_positions_count(),
+        "trades_today_total": len(today_settled),
+        "trades_today_mid_band": len(today_mid),
+        "trades_today_lockin": len(today_lock),
+        "wins_today_mid_band": sum(1 for r in today_mid if is_win(r)),
+        "wins_today_lockin": sum(1 for r in today_lock if is_win(r)),
+        "wr_today_mid_band": wr_pct(today_mid),
+        "wr_today_lockin": wr_pct(today_lock),
+        "pnl_today_usd": pnl_today,
+        "pnl_cumulative_usd": pnl_cum,
+        "kill_switch_state": ks,
+        "open_positions": open_count,
         "wr_lifetime_mid_band": wr_mid_life,
         "wr_lifetime_lockin": wr_lock_life,
-        "trades_lifetime_mid_band": life_mid_t,
-        "trades_lifetime_lockin": life_lock_t,
-        "expected_wr_mid_band_56pct": 56.0,
-        "expected_wr_lockin_87pct": 87.0,
-        "delta_mid_band_pp": (round(wr_mid_life - 56.0, 1) if wr_mid_life is not None else None),
-        "delta_lockin_pp": (round(wr_lock_life - 87.0, 1) if wr_lock_life is not None else None),
+        "trades_lifetime_mid_band": len(life_mid),
+        "trades_lifetime_lockin": len(life_lock),
+        "expected_wr_mid_band": EXPECTED_WR_MID,
+        "expected_wr_lockin": EXPECTED_WR_LOCKIN,
+        "delta_mid_band_pp": (round(wr_mid_life - EXPECTED_WR_MID, 1)
+                              if wr_mid_life is not None else None),
+        "delta_lockin_pp": (round(wr_lock_life - EXPECTED_WR_LOCKIN, 1)
+                            if wr_lock_life is not None else None),
     }
 
     with open(LOG_PATH, "a", newline="") as f:
@@ -177,11 +169,9 @@ def main():
             w.writeheader()
         w.writerow(row)
 
-    # Stdout summary for cron mail / docker logs
-    print(f"[validation day {day_idx}] mid_band trades={today_mid} wins={today_wins_mid} "
-          f"WR={wr_mid_today}%  lockin trades={today_lock} wins={today_wins_lock} WR={wr_lock_today}%  "
-          f"pnl_today=${row['pnl_today_usd']:.2f}  cumul=${row['pnl_cumulative_usd']:.2f}  "
-          f"kill={row['kill_switch_state']}")
+    print(f"Snapshot written for {today_iso} (day_index={day_idx}). "
+          f"trades_today={len(today_settled)} pnl_today=${pnl_today} "
+          f"cum=${pnl_cum} open={open_count} ks={ks}")
 
 
 if __name__ == "__main__":
