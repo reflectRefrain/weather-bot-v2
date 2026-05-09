@@ -14,6 +14,7 @@ Schema notes (these matter — earlier version of this script had wrong assumpti
     Realized P&L lives in the `pnl` table as `realized_usd` with `closed_at`.
   - State table key for kill switch is `kill_switch_today` per src/risk.py.
 """
+import argparse
 import csv
 import datetime as dt
 import os
@@ -26,6 +27,7 @@ START    = dt.date(2026, 5, 8)  # morning-window deployment date
 
 FIELDS = [
     "as_of",
+    "snapshot_date",
     "day_index",
     "trades_today_total",
     "trades_today_mid_band",
@@ -72,9 +74,37 @@ def book_type_for(c, ticker):
     return row[0] if row else None
 
 
-def main():
+def parse_args():
+    p = argparse.ArgumentParser(description="30-day validation snapshot.")
+    p.add_argument(
+        "--date",
+        help=("Snapshot date (YYYY-MM-DD). Defaults to YESTERDAY when invoked "
+              "between 00:00-12:00 UTC, else TODAY. Cron should run at 06:00 "
+              "UTC = 1 AM Central, which is after Pacific cities settle, and "
+              "will auto-pick yesterday's date."),
+    )
+    return p.parse_args()
+
+
+def default_target_date():
+    """After Pacific settlements but before next-day morning scan, we want to
+    snapshot YESTERDAY. The clean window for the cron is 00:00-12:00 UTC
+    (= 19:00 prior-day Central through 07:00 Central). In that window we
+    bias to yesterday. Outside it we use today (manual ad-hoc runs)."""
+    now = dt.datetime.utcnow()
     today = dt.date.today()
-    day_idx = (today - START).days
+    if now.hour < 12:
+        return today - dt.timedelta(days=1)
+    return today
+
+
+def main():
+    args = parse_args()
+    if args.date:
+        target = dt.date.fromisoformat(args.date)
+    else:
+        target = default_target_date()
+    day_idx = (target - START).days
 
     Path(LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
     new_file = not Path(LOG_PATH).exists()
@@ -86,7 +116,7 @@ def main():
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
 
-    today_iso = today.isoformat()
+    target_iso = target.isoformat()
     start_iso = START.isoformat()
 
     # All settled trades since deployment date.
@@ -104,15 +134,16 @@ def main():
         d["book_type"] = book_type_for(c, d["ticker"]) or "unknown"
         settled.append(d)
 
-    def is_today(r):
-        return (r["closed_at"] or "")[:10] == today_iso
+    def is_target_day(r):
+        return (r["closed_at"] or "")[:10] == target_iso
 
     def is_win(r):
         return (r["realized_usd"] or 0) > 0
 
-    today_settled = [r for r in settled if is_today(r)]
+    today_settled = [r for r in settled if is_target_day(r)]
     today_mid     = [r for r in today_settled if r["book_type"] == "mid_band"]
     today_lock    = [r for r in today_settled if r["book_type"] == "lockin"]
+    today_unknown = [r for r in today_settled if r["book_type"] not in ("mid_band", "lockin")]
 
     life_mid  = [r for r in settled if r["book_type"] == "mid_band"]
     life_lock = [r for r in settled if r["book_type"] == "lockin"]
@@ -139,6 +170,7 @@ def main():
 
     row = {
         "as_of": dt.datetime.now().isoformat(timespec="seconds"),
+        "snapshot_date": target_iso,
         "day_index": day_idx,
         "trades_today_total": len(today_settled),
         "trades_today_mid_band": len(today_mid),
@@ -169,9 +201,10 @@ def main():
             w.writeheader()
         w.writerow(row)
 
-    print(f"Snapshot written for {today_iso} (day_index={day_idx}). "
-          f"trades_today={len(today_settled)} pnl_today=${pnl_today} "
-          f"cum=${pnl_cum} open={open_count} ks={ks}")
+    print(f"Snapshot written for {target_iso} (day_index={day_idx}). "
+          f"trades={len(today_settled)} mid={len(today_mid)} lockin={len(today_lock)} "
+          f"unknown={len(today_unknown)} pnl=${pnl_today} cum=${pnl_cum} "
+          f"open={open_count} ks={ks}")
 
 
 if __name__ == "__main__":
