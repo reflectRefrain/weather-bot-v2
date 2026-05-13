@@ -4,14 +4,16 @@ Key improvements over v1:
   1. sigma shrinks during same_day as the day progresses (less uncertainty at 3PM vs 7AM)
   2. METAR obs anchors the effective forecast floor/ceil
      (if it's already 82F, the daily high CANNOT be below 82F)
-  3. min_model_prob gate: don't trade unless model is >= MIN_MODEL_PROB confident
+  3. Obs-trajectory projection trust ramps up through the morning.
+     Before 7 AM local it is zero — NWS forecast used directly.
+     By 10 AM it reaches full weight (0.70). This prevents the early-morning
+     quadratic fit (only 2-3 obs) from dragging the forecast down to near
+     current temperature when the day hasn't warmed yet.
 """
 import datetime as dt
 from statistics import NormalDist
 from zoneinfo import ZoneInfo
 
-# Base sigmas — represent OVERNIGHT / early-morning uncertainty
-# same_day sigma shrinks via time_adjusted_sigma() as day progresses
 SIGMA = {
     "HIGHTEMP":  {"same_day": 3.5, "next_day": 4.5, "weekly": 6.5},
     "LOWTEMP":   {"same_day": 3.0, "next_day": 4.0, "weekly": 6.0},
@@ -20,18 +22,47 @@ SIGMA = {
     "WINDSPEED": {"same_day": 3.0,  "next_day": 4.5,  "weekly": 7.0},
 }
 
-# City timezone map — used for time-adjusted sigma
+# Full 18-city CITY_TZ — covers every Kalshi HIGHTEMP market.
+# Audit fix 2026-05-12: added the 9 cities that defaulted to America/New_York.
 CITY_TZ = {
+    # Eastern
     "NYC":  "America/New_York",
     "BOS":  "America/New_York",
     "PHIL": "America/New_York",
     "MIA":  "America/New_York",
+    "DC":   "America/New_York",
+    "ATL":  "America/New_York",
+    # Central
     "CHI":  "America/Chicago",
     "HOU":  "America/Chicago",
     "AUS":  "America/Chicago",
+    "DAL":  "America/Chicago",
+    "SAT":  "America/Chicago",
+    "MIN":  "America/Chicago",
+    "OKC":  "America/Chicago",
+    # Mountain
     "DEN":  "America/Denver",
+    "PHX":  "America/Phoenix",   # MST year-round, no DST
+    # Pacific
     "LAX":  "America/Los_Angeles",
+    "LAS":  "America/Los_Angeles",
+    "SF":   "America/Los_Angeles",
 }
+
+# Projection ramp: before PROJ_START_H the obs-trajectory projection
+# gets zero weight. Between PROJ_START_H and PROJ_FULL_H it ramps
+# linearly to PROJ_MAX_WEIGHT. After PROJ_FULL_H it holds at max.
+# Rationale: at 4-6 AM only 2-3 hourly obs exist — quadratic fit has
+# no predictive power and was causing -11 to -19F forecast errors.
+PROJ_START_H   = 7.0    # before this hour (local), projection weight = 0
+PROJ_FULL_H    = 10.0   # at this hour and after, full weight is applied
+PROJ_MAX_WEIGHT = 0.70  # maximum blend weight once fully ramped
+
+NBM_BLEND_WEIGHT = 0.50
+
+DISAGREEMENT_THRESHOLD_F = 3.0
+DISAGREEMENT_SIGMA_GAIN_F = 0.40
+DISAGREEMENT_SIGMA_CAP_F = 2.5
 
 
 def sigma_for(variable, horizon):
@@ -39,24 +70,51 @@ def sigma_for(variable, horizon):
     return v.get(horizon, v["next_day"])
 
 
+def _local_hour(city: str) -> float:
+    """Return fractional local hour for the given city right now."""
+    try:
+        tz = ZoneInfo(CITY_TZ.get(city, "America/New_York"))
+        now = dt.datetime.now(tz)
+        return now.hour + now.minute / 60.0
+    except Exception:
+        return 12.0  # safe fallback — midday, full trust
+
+
+def projection_trust_weight(city: str) -> float:
+    """Return the blend weight to give the obs-trajectory projection.
+
+    Ramps linearly from 0.0 at PROJ_START_H to PROJ_MAX_WEIGHT at
+    PROJ_FULL_H, then holds. Before PROJ_START_H returns 0.0 so that
+    early-morning scans (4-7 AM) use NWS directly with only an obs floor.
+
+    Examples (PROJ_START_H=7, PROJ_FULL_H=10, PROJ_MAX_WEIGHT=0.70):
+      4:00 AM -> 0.00  (no projection trust)
+      6:59 AM -> 0.00  (no projection trust)
+      7:00 AM -> 0.00  (threshold, just turning on)
+      8:30 AM -> 0.35  (halfway)
+      10:00 AM-> 0.70  (full weight)
+      2:00 PM -> 0.70  (full weight)
+    """
+    hour = _local_hour(city)
+    if hour < PROJ_START_H:
+        return 0.0
+    if hour >= PROJ_FULL_H:
+        return PROJ_MAX_WEIGHT
+    frac = (hour - PROJ_START_H) / (PROJ_FULL_H - PROJ_START_H)
+    return round(frac * PROJ_MAX_WEIGHT, 4)
+
+
 def time_adjusted_sigma(base_sigma: float, horizon: str, city: str = "NYC") -> float:
     """Shrink same_day sigma as the afternoon progresses.
-
-    Physics: by mid-afternoon, most of the day's temperature evolution has
-    already happened. Remaining uncertainty is proportional to sqrt(time_remaining).
-
-    High-temp window assumed: sunrise 6 AM -> peak 5 PM local (11 hours).
     Sigma floors at 1.0F (irreducible observation error).
     """
     if horizon != "same_day":
         return base_sigma
     try:
-        tz = ZoneInfo(CITY_TZ.get(city, "America/New_York"))
-        now_local = dt.datetime.now(tz)
-        hour = now_local.hour + now_local.minute / 60.0
+        hour = _local_hour(city)
         SUNRISE_H = 6.0
         PEAK_H = 17.0
-        total = PEAK_H - SUNRISE_H  # 11 hours
+        total = PEAK_H - SUNRISE_H
         elapsed = max(0.0, min(hour - SUNRISE_H, total))
         fraction_remaining = 1.0 - (elapsed / total)
         adjusted = base_sigma * (max(fraction_remaining, 0.0) ** 0.5)
@@ -65,34 +123,8 @@ def time_adjusted_sigma(base_sigma: float, horizon: str, city: str = "NYC") -> f
         return base_sigma
 
 
-# Blend weight on the obs-trajectory projection for same_day HIGHTEMP.
-# 0.0 = ignore projection (old behavior), 1.0 = trust projection completely.
-# 0.7 means 70% projection / 30% NWS forecast — anchored hard to physical reality
-# while still respecting the model's atmospheric context.
-PROJECTION_BLEND_WEIGHT = 0.70
-
-# When NBM (Pirate Weather) is available and projection is NOT, blend NWS+NBM
-# 50/50 as a primitive ensemble. Equal weight because both are deterministic
-# point forecasts of similar skill — neither has obvious priority on its own.
-NBM_BLEND_WEIGHT = 0.50
-
-# When NWS and NBM disagree by more than this many degrees F, the truth is
-# noisier than either model implies. Inflate sigma proportionally so we don't
-# overstate confidence.
-DISAGREEMENT_THRESHOLD_F = 3.0
-# Each degree of disagreement above the threshold adds this much to sigma.
-DISAGREEMENT_SIGMA_GAIN_F = 0.40
-# Cap on disagreement-induced sigma inflation (don't let one outlier feed
-# blow the model up).
-DISAGREEMENT_SIGMA_CAP_F = 2.5
-
-
 def ensemble_forecast(nws_f, nbm_f):
-    """Combine NWS and NBM into a single deterministic forecast.
-
-    Returns (blended_f, disagreement_f) where disagreement is |nws - nbm|
-    or None if either input is missing.
-    """
+    """Combine NWS and NBM into a single deterministic forecast."""
     if nws_f is None and nbm_f is None:
         return None, None
     if nws_f is None:
@@ -104,75 +136,78 @@ def ensemble_forecast(nws_f, nbm_f):
 
 
 def disagreement_sigma_bonus(disagreement_f):
-    """Return extra sigma (F) to add when the two model forecasts diverge."""
+    """Return extra sigma (F) to add when NWS and NBM forecasts diverge."""
     if disagreement_f is None:
         return 0.0
     excess = max(0.0, disagreement_f - DISAGREEMENT_THRESHOLD_F)
     return min(DISAGREEMENT_SIGMA_CAP_F, excess * DISAGREEMENT_SIGMA_GAIN_F)
 
 
-def adjusted_forecast(forecast_f, obs_f, variable, horizon, projection=None, nbm_high_f=None):
-    """Anchor the effective model forecast using the current METAR observation
-    and (when available) a projected high from the obs trajectory.
+def adjusted_forecast(forecast_f, obs_f, variable, horizon,
+                      projection=None, nbm_high_f=None, city: str = "NYC"):
+    """Compute the effective model forecast for a city/variable/horizon.
 
-    Args:
-        forecast_f: NWS forecast for the day's high (F)
-        obs_f:      latest METAR temp observation (F), or None
-        variable:   'HIGHTEMP' | 'LOWTEMP' | other
-        horizon:    'same_day' | 'next_day' | 'weekly'
-        projection: optional dict from MetarClient.project_high() with keys
-                    projected_high_f, method, observed_max_f, latest_temp_f.
-                    Pass None to use the original obs-anchor logic.
-        nbm_high_f: optional NBM (Pirate Weather) high-temp point forecast (F)
-                    for HIGHTEMP, or low for LOWTEMP. Used as a 2nd-source
-                    ensemble when no obs-trajectory projection is available.
+    For same_day HIGHTEMP the logic is:
+      1. Establish a hard floor: day's high cannot be below the observed max so far.
+      2. Compute the projection blend weight for the current local hour.
+         Before 7 AM local the weight is 0 — projection is ignored.
+      3. If weight > 0 and a projection exists, blend:
+           effective = weight * projected_high + (1 - weight) * NWS_forecast
+         and floor at max(obs_floor, NWS_forecast).
+         The NWS floor ensures we never output below the NWS value during
+         early ramp — this was the root cause of the -11.93F mean error.
+      4. If weight == 0 (pre-7 AM) or no projection: use NWS directly,
+         floored at obs_f (physical floor only, not a blend anchor).
+      5. NBM ensemble applied only when projection is absent or weight == 0.
 
-    For same_day HIGHTEMP:
-      1. If projection is available with a non-None projected_high_f, blend it
-         with the NWS forecast: PROJECTION_BLEND_WEIGHT * proj + (1-w) * forecast.
-      2. Otherwise fall back to max(forecast, obs) — the prior anchor logic.
-      3. Final result is always floored at observed max (cannot be below obs).
-
-    For same_day LOWTEMP: min(forecast, obs) as the model center (unchanged).
-    For next_day / weekly: obs has no anchoring power — return forecast unchanged.
+    The key invariant: effective_forecast >= forecast_f always for HIGHTEMP.
+    The NWS daytime high is always a lower bound on the effective forecast.
     """
     if horizon != "same_day":
         return forecast_f
 
     if variable == "HIGHTEMP":
-        # Establish a floor: high cannot be below what's already been observed.
-        floor = obs_f
+        # Physical floor: day's high can't be below what's been observed.
+        obs_max = obs_f
         if projection and projection.get("observed_max_f") is not None:
-            floor = max(floor or projection["observed_max_f"], projection["observed_max_f"])
+            om = projection["observed_max_f"]
+            obs_max = max(obs_max or om, om)
 
-        # First: if obs trajectory projection is available, that beats both
-        # NWS and NBM because it's grounded in current atmospheric reality.
-        if projection and projection.get("projected_high_f") is not None and forecast_f is not None:
+        # NWS is always a floor — the effective forecast must be >= NWS.
+        # This prevents the projection from dragging us below the model forecast.
+        nws_floor = forecast_f
+
+        # Determine time-dependent projection weight.
+        w = projection_trust_weight(city) if projection else 0.0
+
+        if w > 0.0 and projection and projection.get("projected_high_f") is not None and forecast_f is not None:
             proj = projection["projected_high_f"]
-            w = PROJECTION_BLEND_WEIGHT
             blended = w * proj + (1.0 - w) * forecast_f
-            if floor is not None:
-                blended = max(blended, floor)
+            # Double floor: never below NWS, never below observed max.
+            if nws_floor is not None:
+                blended = max(blended, nws_floor)
+            if obs_max is not None:
+                blended = max(blended, obs_max)
             return blended
 
-        # Second: if NBM is available, ensemble NWS+NBM 50/50.
+        # No projection (or pre-7 AM suppression): try NBM ensemble.
         if nbm_high_f is not None and forecast_f is not None:
             ens, _ = ensemble_forecast(forecast_f, nbm_high_f)
-            if ens is not None and floor is not None:
-                ens = max(ens, floor)
+            if ens is not None:
+                if nws_floor is not None:
+                    ens = max(ens, nws_floor)
+                if obs_max is not None:
+                    ens = max(ens, obs_max)
             return ens
 
-        # Third: no projection, no NBM — original obs anchor.
+        # Fallback: NWS with obs floor.
         if obs_f is not None and forecast_f is not None:
             return max(forecast_f, obs_f)
         return forecast_f if forecast_f is not None else obs_f
 
     if variable == "LOWTEMP":
-        # Symmetric ensemble for low temp when NBM is around.
         eff = forecast_f
         if nbm_high_f is not None and forecast_f is not None:
-            # Note: caller passes nbm_high_f loosely; for LOWTEMP this is the
-            # NBM low (we re-use the parameter name for backward compat).
             ens, _ = ensemble_forecast(forecast_f, nbm_high_f)
             if ens is not None:
                 eff = ens
