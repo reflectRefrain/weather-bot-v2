@@ -21,8 +21,11 @@ bankroll_usd: 200.00
 
 # Risk controls
 risk:
-  daily_loss_limit_pct: 0.025      # Kill bot if down 2.5% in one day (=$5 on $200)
-                                   # Validation cap: 5 losing $1 trades before halt.
+  daily_loss_limit_pct: 0.015      # Kill bot if down 1.5% in one day (=$3 on $200)
+                                   # Tightened from 0.025 — 3 losing $1 trades before halt.
+                                   # Restore to 0.025 once calibrate.py confirms model edge.
+  max_daily_trades: 10             # Hard cap on total trades closed in one calendar day.
+                                   # Prevents May-7-style re-entry cycling after TP/SL hits.
   max_open_positions: 5            # Max concurrent open positions
   min_edge_cents: 6                # (legacy path) min model edge over mid — unused
   max_spread_cents: 15             # Skip markets with spread wider than this
@@ -49,11 +52,13 @@ risk:
   legacy_half_size: true           # (no-op while legacy is off)
 
   # mid_band book: YES @ 40-49c, spread ≤ 2c, between-strikes, skip CHI/DC/ATL
+  # Added mid_band_min_model_prob: model must agree ≥48% before firing price-only entry.
   mid_band_enabled: true
   mid_band_price_min: 40
   mid_band_price_max: 49
   mid_band_max_spread_cents: 2
   mid_band_excluded_cities: ["CHI", "DC", "ATL"]
+  mid_band_min_model_prob: 0.48    # NEW: filter junk mid_band entries where model disagrees
 
   # tail_short: DISABLED. Backtest -65% EV in morning, -15% in afternoon.
   # Set tail_min_prob_no to 1.01 (impossible) so the gate never opens.
@@ -67,12 +72,6 @@ risk:
   #   mp_yes >= max(lockin_min_prob, breakeven + lockin_fee_buffer)
   # 0.02 buffer = 2pp cushion above pure fee breakeven.
   lockin_fee_buffer: 0.02
-
-  # During morning-window validation, lockin_yes is the ONLY non-mid_band
-  # book firing. Force lockin_no off by capping NO-side entries to a price
-  # range no real book can hit:
-  # NOTE: lockin currently emits YES only (book_type='lockin' → side='yes').
-  # No additional gate needed; this comment documents the intent.
 
   # Lockin tie-buffer for Kalshi 'strictly greater than' rule:
   # NHIGH contract resolves NO if actual high == strike. Forecast must clear
