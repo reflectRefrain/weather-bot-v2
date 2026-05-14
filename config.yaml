@@ -54,6 +54,12 @@ risk:
   mid_band_price_max: 49
   mid_band_max_spread_cents: 2
   mid_band_excluded_cities: ["CHI", "DC", "ATL"]
+  # 2026-05-14 model gate — lifetime mid_band WR was 38.9% over 18 trades because
+  # the original rule had no model check. The bot was buying YES on contracts
+  # its own model predicted would lose. This requires mp_yes >= 0.55 before
+  # firing. Expect trade volume to drop sharply (likely 60-80% fewer trades) —
+  # that's the point. We want fewer, higher-conviction trades.
+  mid_band_min_model_prob: 0.55
 
   # tail_short: DISABLED. Backtest -65% EV in morning, -15% in afternoon.
   # Set tail_min_prob_no to 1.01 (impossible) so the gate never opens.
