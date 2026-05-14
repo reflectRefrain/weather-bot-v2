@@ -363,6 +363,15 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
     mid_band_price_max     = float(risk.get("mid_band_price_max",         49))
     mid_band_max_spread    = float(risk.get("mid_band_max_spread_cents",  2))
     mid_band_excluded      = set(risk.get("mid_band_excluded_cities",     ["CHI", "DC", "ATL"]))
+    # MODEL GATE (2026-05-14): mid_band lifetime 38.9% WR over 18 trades proved
+    # the original price-only rule has no edge live. The bot's effective_forecast
+    # was running 6-15F COLD on every losing trade (model_prob_yes ~0.00-0.06)
+    # but mid_band fired anyway because no model gate existed. This adds the
+    # gate: mid_band cannot fire unless the bot's own model agrees the YES is
+    # at least mid_band_min_model_prob likely. Default 0.55 = require positive
+    # expected value over the price (a YES at 45c needs 45% true prob just to
+    # break even ignoring fees; 55% gives a real cushion).
+    mid_band_min_model_prob = float(risk.get("mid_band_min_model_prob",   0.55))
 
     # Strategy gating — when False, only the two named books fire and the
     # generic edge scanner below is bypassed (decisions still logged as skipped).
@@ -541,6 +550,8 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
             and ya is not None and yb is not None
             and mid_band_price_min <= ya <= mid_band_price_max
             and (ya - yb) <= mid_band_max_spread
+            and mp is not None
+            and mp >= mid_band_min_model_prob
         ):
             mb_row = dict(decision_row)
             mb_row["decision"] = "candidate_yes"
@@ -559,7 +570,7 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
                 "strike_high":        hi,
                 "yes_bid":            yb,
                 "yes_ask":            ya,
-                "model_prob":         mp,           # logged for telemetry only
+                "model_prob":         mp,           # GATED: must be >= mid_band_min_model_prob
                 "market_mid":         mid,
                 "edge_cents":         round(edge_yes, 2),
                 "forecast_f":         forecast_f,
