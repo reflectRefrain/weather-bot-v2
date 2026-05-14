@@ -26,6 +26,7 @@ BOT_COMMANDS = [
     BotCommand("strategy",    "How the bot works right now"),
     BotCommand("pause",       "Stop trading (kill switch ON)"),
     BotCommand("resume",      "Resume trading (kill switch OFF)"),
+    BotCommand("killcheck",   "Full kill-switch + daily-loss diagnostic"),
     BotCommand("mode",        "Show current mode (paper/live)"),
     BotCommand("setpaper",    "Switch to paper mode"),
     BotCommand("setlive",     "Switch to live mode"),
@@ -54,14 +55,115 @@ def fmt_status() -> str:
     kill  = kill_switch_on()
     mode  = get_state("mode") or "paper"
     n_pos = len(open_positions())
+    today = dt.date.today().isoformat()
+    with conn() as c:
+        day_pnl = c.execute(
+            "SELECT COALESCE(SUM(realized_usd),0) FROM pnl WHERE date(closed_at)=?",
+            (today,)
+        ).fetchone()[0]
+        trades_24h = c.execute(
+            "SELECT COUNT(*) FROM positions WHERE opened_at >= datetime('now','-24 hours')"
+        ).fetchone()[0]
     return (
         f"Weather Bot v2\n"
         f"{SEP}\n"
-        f"Status   : {'🔴 PAUSED' if kill else '🟢 RUNNING'}\n"
-        f"Mode     : {'📄 PAPER' if mode == 'paper' else '💰 LIVE'}\n"
-        f"Positions: {n_pos} open\n"
-        f"Time     : {dt.datetime.utcnow().strftime('%H:%M UTC')}"
+        f"Status     : {'🔴 PAUSED' if kill else '🟢 RUNNING'}\n"
+        f"Mode       : {'📄 PAPER' if mode == 'paper' else '💰 LIVE'}\n"
+        f"Positions  : {n_pos} open\n"
+        f"Today P&L  : ${day_pnl:+.2f}\n"
+        f"New (24h)  : {trades_24h} trade(s)\n"
+        f"Time       : {dt.datetime.utcnow().strftime('%H:%M UTC')}\n"
+        f"{SEP}\n"
+        f"Tip: /killcheck for full kill-switch diagnostic"
     )
+
+
+def fmt_killcheck() -> str:
+    """Full diagnostic: every place the kill switch lives + daily loss budget."""
+    today = dt.date.today().isoformat()
+    with conn() as c:
+        ks_runtime = c.execute(
+            "SELECT value FROM state WHERE key='kill_switch'"
+        ).fetchone()
+        ks_today = c.execute(
+            "SELECT value FROM state WHERE key='kill_switch_today'"
+        ).fetchone()
+        day_start = c.execute(
+            "SELECT value FROM state WHERE key='day_start_balance'"
+        ).fetchone()
+        day_pnl = c.execute(
+            "SELECT COALESCE(SUM(realized_usd),0) FROM pnl WHERE date(closed_at)=?",
+            (today,)
+        ).fetchone()[0]
+        last_kill_evt = c.execute(
+            "SELECT ts, level, message FROM events "
+            "WHERE message LIKE '%Kill switch%' OR message LIKE '%kill_switch%' "
+            "ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+        recent_trades = c.execute(
+            "SELECT ticker, side, qty, avg_price_cents, opened_at FROM positions "
+            "WHERE opened_at >= datetime('now','-24 hours') ORDER BY opened_at DESC LIMIT 5"
+        ).fetchall()
+
+    runtime_val = ks_runtime[0] if ks_runtime else "(unset)"
+    today_val   = ks_today[0]   if ks_today   else "(unset)"
+    runtime_emoji = "🔴" if runtime_val == "ON" else "🟢"
+
+    # Pull last cycle log line for ground-truth confirmation
+    cycle_line = "(could not read logs)"
+    try:
+        out = subprocess.run(
+            "docker logs --tail 50 wb2-trader 2>&1 | grep -E 'Cycle [0-9]+ - kill=' | tail -1",
+            shell=True, capture_output=True, text=True, timeout=10
+        )
+        if out.stdout.strip():
+            cycle_line = out.stdout.strip()
+    except Exception:
+        pass
+
+    # Daily loss budget — runtime trips kill at -$5/day default ($1 cap * 5)
+    try:
+        import yaml
+        with open("/app/config.yaml") as f:
+            cfg = yaml.safe_load(f)
+        bankroll = float(cfg.get("bankroll_usd", 0))
+        loss_pct = float(cfg.get("risk", {}).get("daily_loss_limit_pct", 0))
+        limit_usd = bankroll * loss_pct
+    except Exception:
+        bankroll = 0.0
+        limit_usd = 0.0
+
+    lines = [
+        "🛡️  Kill Switch Diagnostic",
+        SEP,
+        f"Runtime key (kill_switch)      : {runtime_emoji} {runtime_val}",
+        f"Reporting key (kill_switch_today): {today_val}  (unused by runtime)",
+        SEP,
+        f"Today  : {today}",
+        f"P&L    : ${day_pnl:+.2f}",
+        f"Limit  : -${limit_usd:.2f}  (auto-trips kill when hit)",
+        f"Budget : ${(limit_usd + day_pnl):.2f} remaining",
+        SEP,
+        "Last cycle log line:",
+        f"  {cycle_line}",
+        SEP,
+    ]
+    if last_kill_evt:
+        lines.append(f"Last kill event: {last_kill_evt[0][:19]}")
+        lines.append(f"  {last_kill_evt[2][:80]}")
+        lines.append(SEP)
+    if recent_trades:
+        lines.append(f"New trades (last 24h): {len(recent_trades)}")
+        for t in recent_trades:
+            lines.append(f"  {t[0]} {t[1]} x{t[2]} @ {t[3]}¢  ({t[4][11:16]} UTC)")
+    else:
+        lines.append("New trades (last 24h): 0 ✅")
+    lines.append(SEP)
+    if runtime_val == "ON":
+        lines.append("✅ Bot is HALTED. No new entries will fire.")
+    else:
+        lines.append("⚠️  Bot is LIVE. Use /pause to halt.")
+    return "\n".join(lines)
 
 
 def fmt_positions() -> str:
@@ -356,6 +458,11 @@ async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @only_owner
+async def cmd_killcheck(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(fmt_killcheck())
+
+
+@only_owner
 async def cmd_mode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Current mode: {(get_state('mode') or 'paper').upper()}")
 
@@ -464,6 +571,7 @@ async def run_bot_async():
     app.add_handler(CommandHandler("strategy",    cmd_strategy))
     app.add_handler(CommandHandler("pause",       cmd_pause))
     app.add_handler(CommandHandler("resume",      cmd_resume))
+    app.add_handler(CommandHandler("killcheck",   cmd_killcheck))
     app.add_handler(CommandHandler("mode",        cmd_mode))
     app.add_handler(CommandHandler("setpaper",    cmd_setpaper))
     app.add_handler(CommandHandler("setlive",     cmd_setlive))
