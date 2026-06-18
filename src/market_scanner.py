@@ -4,37 +4,31 @@ from zoneinfo import ZoneInfo
 from db import conn
 from kalshi_client import KalshiClient
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Full 18-city Kalshi HIGHTEMP coverage — added by morning-window PR.
-#  Verified series tickers come from backtest/series_map.py (manual probe of
-#  the Kalshi public series endpoint).
-# ─────────────────────────────────────────────────────────────────────────────
 CITY_COORDS = {
     "NYC":  (40.7789, -73.9692),
     "LAX":  (33.9425, -118.4081),
-    "CHI":  (41.7868, -87.7522),   # Midway (KMDW) — Kalshi settlement station
+    "CHI":  (41.7868, -87.7522),
     "MIA":  (25.7959, -80.2870),
     "DEN":  (39.8561, -104.6737),
     "AUS":  (30.1975, -97.6664),
     "PHIL": (39.8729, -75.2437),
     "BOS":  (42.3606, -71.0106),
     "HOU":  (29.9844, -95.3414),
-    # ─ added 2026-05-08 in morning-window PR ─
     "ATL":  (33.6407, -84.4277),
     "PHX":  (33.4373, -112.0078),
-    "DC":   (38.8512, -77.0402),    # KDCA — Reagan, NOT Dulles
+    "DC":   (38.8512, -77.0402),
     "LAS":  (36.0840, -115.1537),
     "SAT":  (29.5337, -98.4698),
     "MIN":  (44.8848, -93.2223),
-    "DAL":  (32.8998, -97.0403),    # KDFW
-    "SF":   (37.6213, -122.3790),   # KSFO
+    "DAL":  (32.8998, -97.0403),
+    "SF":   (37.6213, -122.3790),
     "OKC":  (35.3931, -97.6007),
 }
 
 CITY_METAR = {
     "NYC":  "KNYC",
     "LAX":  "KLAX",
-    "CHI":  "KMDW",   # Kalshi CLI settles on Midway, not O'Hare
+    "CHI":  "KMDW",
     "MIA":  "KMIA",
     "DEN":  "KDEN",
     "AUS":  "KAUS",
@@ -67,34 +61,31 @@ CITY_TZ = {
     "MIN":  "America/Chicago",
     "OKC":  "America/Chicago",
     "DEN":  "America/Denver",
-    "PHX":  "America/Phoenix",      # MST, no DST
+    "PHX":  "America/Phoenix",
     "LAX":  "America/Los_Angeles",
     "LAS":  "America/Los_Angeles",
     "SF":   "America/Los_Angeles",
 }
 
-# Maps our internal city code -> the Kalshi series tail used to build series
-# tickers via VAR_PREFIX. Verified May 2026 — 9 of these use the new KXHIGHT*
-# prefix family rather than the original KXHIGH* family.
 CITY_CODES = {
     "NYC":  ["NY", "NYC"],
     "LAX":  ["LAX", "LA"],
     "CHI":  ["CHI"],
     "MIA":  ["MIA"],
     "DEN":  ["DEN"],
-    "AUS":  ["AUS"],          # KXHIGHAUS
-    "PHIL": ["PHIL"],         # KXHIGHPHIL
-    "BOS":  ["TBOS"],         # KXHIGHTBOS
-    "HOU":  ["THOU"],         # KXHIGHTHOU
-    "ATL":  ["TATL"],         # KXHIGHTATL
-    "PHX":  ["TPHX"],         # KXHIGHTPHX
-    "DC":   ["TDC"],          # KXHIGHTDC
-    "LAS":  ["TLV"],          # KXHIGHTLV  (Las Vegas → LV)
-    "SAT":  ["TSATX"],        # KXHIGHTSATX (San Antonio → SATX)
-    "MIN":  ["TMIN"],         # KXHIGHTMIN
-    "DAL":  ["TDAL"],         # KXHIGHTDAL
-    "SF":   ["TSFO"],         # KXHIGHTSFO
-    "OKC":  ["TOKC"],         # KXHIGHTOKC
+    "AUS":  ["AUS"],
+    "PHIL": ["PHIL"],
+    "BOS":  ["TBOS"],
+    "HOU":  ["THOU"],
+    "ATL":  ["TATL"],
+    "PHX":  ["TPHX"],
+    "DC":   ["TDC"],
+    "LAS":  ["TLV"],
+    "SAT":  ["TSATX"],
+    "MIN":  ["TMIN"],
+    "DAL":  ["TDAL"],
+    "SF":   ["TSFO"],
+    "OKC":  ["TOKC"],
 }
 
 VAR_PREFIX = {
@@ -109,16 +100,8 @@ MONTHS = {m: i + 1 for i, m in enumerate(
     ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
 )}
 
-# ── Entry time windows (local hour, inclusive) ────────────────────────────────
-# 2026-05-08: Morning-window PR. The afternoon backtest at 14:30-16:30 LOCAL
-# (the prior window) showed every strategy unprofitable — mid_band at -39% EV,
-# lockin_yes at -4% EV. The only window with measured positive EV across 90 days
-# / 18 cities was 4:00-9:00 LOCAL: mid_band peaks at +19% EV (hour 4) and
-# averages +6-12% EV across hours 4-8; lockin_yes is +4-9% EV across hours 4-10.
-# By 9am the edge has decayed and goes negative through the afternoon as the
-# day's high becomes increasingly observable.
-SAME_DAY_ENTRY_START = 4.0   # 4:00 AM local — peak edge for both books
-SAME_DAY_ENTRY_END   = 9.0   # 9:00 AM local — edge has decayed to ~0 by then
+SAME_DAY_ENTRY_START = 4.0
+SAME_DAY_ENTRY_END   = 9.0
 NEXT_DAY_ENTRY_START = 6
 NEXT_DAY_ENTRY_END   = 10
 
@@ -132,10 +115,6 @@ def log_event(level, module, message):
 
 
 def log_decision(row: dict):
-    """Append one row to model_decisions. Foundation for empirical sigma
-    calibration, Brier score reports, and replay backtest. Best-effort —
-    never raises, never blocks the scan loop.
-    """
     try:
         with conn() as c:
             c.execute(
@@ -181,7 +160,6 @@ def log_decision(row: dict):
                 ),
             )
     except Exception as e:
-        # Never let logging break the trade loop.
         try:
             log_event("WARN", "scanner", f"log_decision failed: {str(e)[:160]}")
         except Exception:
@@ -227,11 +205,6 @@ def target_date_from_ticker(tk):
 
 
 def horizon_of(target_date_iso: str, city: str = "NYC") -> str:
-    """
-    Determine horizon using LOCAL date for the city, not UTC.
-    Prevents the bug where evening trades cross midnight UTC and
-    get misclassified.
-    """
     if not target_date_iso:
         return "unknown"
     try:
@@ -251,14 +224,10 @@ def horizon_of(target_date_iso: str, city: str = "NYC") -> str:
 
 
 def is_valid_entry_time(horizon: str, city: str) -> bool:
-    """
-    Gate entries by local time of day.
-    same_day: 2:30PM-4:30PM local (obs-anchored lock-in window).
-    """
     try:
         tz = ZoneInfo(CITY_TZ.get(city, "America/New_York"))
         now = dt.datetime.now(tz)
-        hour = now.hour + now.minute / 60.0   # decimal local hour for fractional windows
+        hour = now.hour + now.minute / 60.0
         if horizon == "same_day":
             ok = SAME_DAY_ENTRY_START <= hour <= SAME_DAY_ENTRY_END
             if not ok:
@@ -311,25 +280,6 @@ def fetch_single(k, ticker):
 
 
 def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
-    """
-    Score each market against NOAA forecast + METAR obs anchor.
-
-    Tier 2.3 two-book candidate emission:
-      - LOCK-IN BOOK: YES side, model_prob >= 0.85, price <= 92c, strike
-        within 2F of effective forecast, min_reward_ratio 0.10. The bread
-        and butter — small edge, frequent fills, high hit rate.
-      - TAIL-SHORT BOOK: NO side, model_prob_NO >= 0.95, NO price 15-30c,
-        strike >= 4F from effective forecast, min_reward_ratio 1.5. Picks
-        up the small percentage of the time when an unhinged tail closes
-        cheap and we can cash on it disqualifying.
-      - LEGACY "either side has edge" path stays as a fallback so we keep
-        non-extreme trades flowing while the new books accumulate data.
-
-    VETERAN RULES ENFORCED (legacy path):
-    1. max_entry_no_cents  — never pay >75c for a NO (bad risk/reward trap)
-    2. min_reward_ratio    — profit potential must be >= 25c per $1 risked
-    3. Sizing favors cheap high-edge trades over expensive "sure things"
-    """
     from model import (sigma_for, time_adjusted_sigma, adjusted_forecast,
                        yes_prob, market_mid_prob, disagreement_sigma_bonus)
     risk = cfg.get("risk", {})
@@ -340,7 +290,6 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
     max_entry_no_cents  = float(risk.get("max_entry_no_cents", 75))
     min_reward_ratio    = float(risk.get("min_reward_ratio",   0.25))
 
-    # Tier 2.3 book filter parameters — overridable from config.yaml under risk:
     lockin_min_prob       = float(risk.get("lockin_min_prob",        0.85))
     lockin_max_price      = float(risk.get("lockin_max_price_cents", 92))
     lockin_max_dist_f     = float(risk.get("lockin_max_dist_f",      2.0))
@@ -353,26 +302,15 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
     tail_min_dist_f       = float(risk.get("tail_min_dist_f",        4.0))
     tail_min_reward       = float(risk.get("tail_min_reward_ratio",  1.5))
 
-    # MID_BAND BOOK — added by morning-window PR (2026-05-08).
-    # Pure price-driven entry, no model dependency. Backtest finding:
-    # YES @ 40-49¢, spread ≤ 2¢, between-strikes, HIGHTEMP only, skip CHI/DC/ATL
-    # produced +18-23% EV across 90 days / 246 trades when entered in the
-    # 4-9am LOCAL window. Tightly bounded — do not loosen without re-validating.
-    mid_band_enabled       = bool(risk.get("mid_band_enabled",            False))
-    mid_band_price_min     = float(risk.get("mid_band_price_min",         40))
-    mid_band_price_max     = float(risk.get("mid_band_price_max",         49))
-    mid_band_max_spread    = float(risk.get("mid_band_max_spread_cents",  2))
-    mid_band_excluded      = set(risk.get("mid_band_excluded_cities",     ["CHI", "DC", "ATL"]))
+    mid_band_enabled        = bool(risk.get("mid_band_enabled",           False))
+    mid_band_price_min      = float(risk.get("mid_band_price_min",        40))
+    mid_band_price_max      = float(risk.get("mid_band_price_max",        49))
+    mid_band_max_spread     = float(risk.get("mid_band_max_spread_cents", 2))
+    mid_band_excluded       = set(risk.get("mid_band_excluded_cities",    ["CHI", "DC", "ATL"]))
+    mid_band_min_model_prob = float(risk.get("mid_band_min_model_prob",   0.48))
 
-    # Strategy gating — when False, only the two named books fire and the
-    # generic edge scanner below is bypassed (decisions still logged as skipped).
     enable_legacy_edge_path = bool(risk.get("enable_legacy_edge_path", False))
-
-    # Optional half-size mode for legacy candidates (Option B). When True, the
-    # executor halves max_per_ticker_usd / kelly_usd for any candidate tagged
-    # book_type='legacy', so legacy keeps generating data at reduced risk while
-    # we compare it head-to-head against the named books.
-    legacy_half_size = bool(risk.get("legacy_half_size", True))
+    legacy_half_size        = bool(risk.get("legacy_half_size", True))
 
     candidates = []
     for m in markets:
@@ -395,7 +333,6 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
         if not coords:
             continue
 
-        # Recompute horizon with local date
         hz = horizon_of(m.get("target_date", ""), city)
 
         if hz not in set(cfg.get("horizons", ["same_day"])):
@@ -427,7 +364,6 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
             if station and metar_client:
                 obs = metar_client.latest(station)
                 obs_f = obs.get("temp_f")
-                # Same-day HIGHTEMP only — obs trajectory has no signal otherwise.
                 if hz == "same_day" and var == "HIGHTEMP":
                     try:
                         projection = metar_client.project_high(station, city)
@@ -436,8 +372,6 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
         except Exception:
             pass
 
-        # Tier 2.2: pull NBM (Pirate Weather) second-source forecast.
-        # Best-effort — missing key, network down, no daily block all return None.
         nbm_high_f = None
         nbm_low_f = None
         try:
@@ -449,16 +383,16 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
         except Exception:
             pass
 
-        # Pick the right NBM value for the variable — model.adjusted_forecast()
-        # accepts a single nbm_high_f param that means "NBM same-direction value".
         nbm_for_var = nbm_high_f if var == "HIGHTEMP" else nbm_low_f
 
+        # FIX 2026-05-12: pass city= so adjusted_forecast uses the correct
+        # local hour when computing projection_trust_weight. Without this,
+        # all cities used America/New_York for the projection ramp.
         effective_forecast = adjusted_forecast(
             forecast_f, obs_f, var, hz,
-            projection=projection, nbm_high_f=nbm_for_var,
+            projection=projection, nbm_high_f=nbm_for_var, city=city,
         )
 
-        # Disagreement signal — only meaningful when both NWS and NBM exist.
         model_disagreement_f = None
         sigma_bonus = 0.0
         if forecast_f is not None and nbm_for_var is not None:
@@ -479,8 +413,6 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
         edge_yes = (mp - mid) * 100
         edge_no  = ((1 - mp) - (1 - mid)) * 100
 
-        # Capture decision for the model_decisions log.
-        # Default outcome is 'skip:<reason>'; mutated below if we add to candidates.
         decision_row = {
             "ticker":               ticker,
             "city":                 city,
@@ -509,13 +441,6 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
             "entry_price_cents":    None,
         }
 
-        # ----------------------------------------------------------------
-        # Tier 2.3: TWO-BOOK candidate emission. Try lock-in book first, then
-        # tail-short book. Both can fire on the same scan against the same
-        # market only if they target different sides (lock-in YES + tail NO).
-        # `strike_distance_f` = |effective_forecast - strike midpoint or edge|
-        # used for the distance-from-projection floor in tail shorts.
-        # ----------------------------------------------------------------
         if effective_forecast is not None:
             strike_ref = None
             if st == "greater" and lo is not None:
@@ -529,10 +454,6 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
             strike_distance_f = None
 
         # ----- MID_BAND BOOK (YES @ 40-49¢) -----
-        # Fires before lockin/tail. Price band is below lockin's 70-92¢ floor,
-        # so this block cannot collide with a lockin candidate on the same
-        # ticker. If mid_band fires we `continue` to prevent the legacy path
-        # from also emitting on the same market.
         if (
             mid_band_enabled
             and var == "HIGHTEMP"
@@ -541,6 +462,7 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
             and ya is not None and yb is not None
             and mid_band_price_min <= ya <= mid_band_price_max
             and (ya - yb) <= mid_band_max_spread
+            and mp >= mid_band_min_model_prob
         ):
             mb_row = dict(decision_row)
             mb_row["decision"] = "candidate_yes"
@@ -559,7 +481,7 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
                 "strike_high":        hi,
                 "yes_bid":            yb,
                 "yes_ask":            ya,
-                "model_prob":         mp,           # logged for telemetry only
+                "model_prob":         mp,
                 "market_mid":         mid,
                 "edge_cents":         round(edge_yes, 2),
                 "forecast_f":         forecast_f,
@@ -576,12 +498,6 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
         # ----- LOCK-IN BOOK (YES) -----
         no_ask_for_market = 100 - yb if yb is not None else None
 
-        # Fee-aware mp_yes floor — Kalshi taker fee = ceil(0.07 * P * (1-P)).
-        # Net win at YES price ya: (1 - ya/100 - fee). Pure breakeven mp_yes
-        # = (ya/100) / (1 - fee). We require model_prob to clear breakeven by
-        # at least lockin_fee_buffer (default 0.02) on top of lockin_min_prob.
-        # This kills the negative-EV band at high yes_prices (86c-92c) without
-        # affecting cheaper entries where 0.85 already binds.
         if ya is not None and ya > 0:
             ya_dollars = ya / 100.0
             _fee_yes = math.ceil(0.07 * ya_dollars * (1 - ya_dollars) * 100) / 100
@@ -590,21 +506,12 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
         else:
             mp_required_yes = lockin_min_prob
 
-        # Tie-buffer for Kalshi 'greater than' / 'less than' rules — these are
-        # STRICTLY greater/less. A miss landing exactly on the strike resolves
-        # against YES. Require the forecast to clear the strike by at least
-        # lockin_tie_buffer_f (default 1.0 deg F) on the same side as YES wins.
         tie_safe = True
         if strike_ref is not None:
             if st == "greater":
-                # YES wins when actual > strike_low. Forecast must exceed strike
-                # by tie_buffer to absorb a 1F adverse miss without landing on tie.
                 tie_safe = (effective_forecast - strike_ref) >= lockin_tie_buffer_f
             elif st == "less":
-                # YES wins when actual < strike_high.
                 tie_safe = (strike_ref - effective_forecast) >= lockin_tie_buffer_f
-            # 'between' covers an interior band — tie-on-edge less of a concern
-            # because a 1F miss off forecast typically still lands inside the band.
 
         if (
             mp >= mp_required_yes
@@ -646,9 +553,6 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
                     "target_date":        m.get("target_date"),
                     "strike_distance_f":  round(strike_distance_f, 2),
                 })
-                # Lock-in candidates do NOT also try tail-short for the same
-                # ticker — a strike close to forecast can't simultaneously be
-                # a far-tail short.
                 continue
 
         # ----- TAIL-SHORT BOOK (NO) -----
@@ -693,10 +597,7 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
                 })
                 continue
 
-        # ----- LEGACY EITHER-SIDE EDGE PATH (fallback below) -----
-        # Gated by config: when enable_legacy_edge_path is False, the path is
-        # bypassed entirely. When True, candidates are tagged book_type='legacy'
-        # so the executor can apply half-size (legacy_half_size flag).
+        # ----- LEGACY PATH -----
         if not enable_legacy_edge_path:
             decision_row["decision"] = "skip:legacy_path_disabled"
             log_decision(decision_row)
@@ -707,57 +608,31 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
             log_decision(decision_row)
             continue
 
-        # YES side
         if edge_yes >= min_edge_cents and min_entry_cents <= ya <= max_entry_cents:
             reward_ratio = (100 - ya) / ya if ya > 0 else 0
             if reward_ratio < min_reward_ratio:
-                log_event("INFO", "scanner",
-                          f"reward_ratio_block YES {ticker}: entry={ya}c ratio={reward_ratio:.2f} min={min_reward_ratio}")
                 decision_row["decision"] = f"skip:reward_ratio_yes:{reward_ratio:.2f}"
                 log_decision(decision_row)
                 continue
             decision_row["decision"] = "candidate_yes"
             decision_row["entry_price_cents"] = ya
             log_decision(decision_row)
-            candidates.append({  # noqa: log_decision happens above
-                "ticker":             ticker,
-                "side":               "yes",
-                "variable":           var,
-                "city":               city,
-                "horizon":            hz,
-                "strike_type":        st,
-                "strike_low":         lo,
-                "strike_high":        hi,
-                "yes_bid":            yb,
-                "yes_ask":            ya,
-                "model_prob":         mp,
-                "market_mid":         mid,
-                "edge_cents":         round(edge_yes, 2),
-                "forecast_f":         forecast_f,
-                "effective_forecast": effective_forecast,
-                "obs_f":              obs_f,
-                "sigma_used":         round(sigma, 2),
-                "price_cents":        ya,
-                "reward_ratio":       round(reward_ratio, 3),
-                "target_date":        m.get("target_date"),
-                "book_type":          "legacy",
-                "half_size":          legacy_half_size,
+            candidates.append({
+                "ticker": ticker, "side": "yes", "variable": var, "city": city,
+                "horizon": hz, "strike_type": st, "strike_low": lo, "strike_high": hi,
+                "yes_bid": yb, "yes_ask": ya, "model_prob": mp, "market_mid": mid,
+                "edge_cents": round(edge_yes, 2), "forecast_f": forecast_f,
+                "effective_forecast": effective_forecast, "obs_f": obs_f,
+                "sigma_used": round(sigma, 2), "price_cents": ya,
+                "reward_ratio": round(reward_ratio, 3), "target_date": m.get("target_date"),
+                "book_type": "legacy", "half_size": legacy_half_size,
             })
-
-        # YES had edge but failed price gate (too cheap or too expensive).
-        # Log it so empirical sigma calibration sees the boundary cases too.
         elif edge_yes >= min_edge_cents:
             decision_row["decision"] = f"skip:yes_price_oob:{ya}"
             log_decision(decision_row)
-            continue
-
-        # NO side
         elif edge_no >= min_edge_cents:
             no_ask = 100 - yb
-            # Veteran rule: never buy NO above max_entry_no_cents
             if no_ask > max_entry_no_cents:
-                log_event("INFO", "scanner",
-                          f"no_price_block {ticker}: no_ask={no_ask}c max={max_entry_no_cents}c")
                 decision_row["decision"] = f"skip:no_price_block:{no_ask}"
                 log_decision(decision_row)
                 continue
@@ -767,8 +642,6 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
                 continue
             reward_ratio = (100 - no_ask) / no_ask if no_ask > 0 else 0
             if reward_ratio < min_reward_ratio:
-                log_event("INFO", "scanner",
-                          f"reward_ratio_block NO {ticker}: entry={no_ask}c ratio={reward_ratio:.2f} min={min_reward_ratio}")
                 decision_row["decision"] = f"skip:reward_ratio_no:{reward_ratio:.2f}"
                 log_decision(decision_row)
                 continue
@@ -776,32 +649,15 @@ def score_candidates(markets, noaa_client, metar_client, cfg, nbm_client=None):
             decision_row["entry_price_cents"] = no_ask
             log_decision(decision_row)
             candidates.append({
-                "ticker":             ticker,
-                "side":               "no",
-                "variable":           var,
-                "city":               city,
-                "horizon":            hz,
-                "strike_type":        st,
-                "strike_low":         lo,
-                "strike_high":        hi,
-                "yes_bid":            yb,
-                "yes_ask":            ya,
-                "model_prob":         1 - mp,
-                "market_mid":         1 - mid,
-                "edge_cents":         round(edge_no, 2),
-                "forecast_f":         forecast_f,
-                "effective_forecast": effective_forecast,
-                "obs_f":              obs_f,
-                "sigma_used":         round(sigma, 2),
-                "price_cents":        no_ask,
-                "reward_ratio":       round(reward_ratio, 3),
-                "target_date":        m.get("target_date"),
-                "book_type":          "legacy",
-                "half_size":          legacy_half_size,
+                "ticker": ticker, "side": "no", "variable": var, "city": city,
+                "horizon": hz, "strike_type": st, "strike_low": lo, "strike_high": hi,
+                "yes_bid": yb, "yes_ask": ya, "model_prob": 1 - mp, "market_mid": 1 - mid,
+                "edge_cents": round(edge_no, 2), "forecast_f": forecast_f,
+                "effective_forecast": effective_forecast, "obs_f": obs_f,
+                "sigma_used": round(sigma, 2), "price_cents": no_ask,
+                "reward_ratio": round(reward_ratio, 3), "target_date": m.get("target_date"),
+                "book_type": "legacy", "half_size": legacy_half_size,
             })
-
-        # Neither YES nor NO had enough edge. Still log so we have the
-        # full distribution for calibration (including 'boring' markets).
         else:
             decision_row["decision"] = "skip:no_edge_either_side"
             log_decision(decision_row)
@@ -884,7 +740,6 @@ def scan_once(config_path="/app/config.yaml"):
 
 def scan(kalshi_client=None, noaa_client=None, metar_client=None,
          nbm_client=None, config_path="/app/config.yaml"):
-    """Main entry point called by main.py."""
     from noaa_client import NoaaClient
     from metar_client import MetarClient
     import yaml
@@ -897,7 +752,7 @@ def scan(kalshi_client=None, noaa_client=None, metar_client=None,
     if nbm_client is None:
         try:
             from nbm_client import NbmClient
-            nbm_client = NbmClient()  # reads PIRATE_WEATHER_API_KEY from env
+            nbm_client = NbmClient()
         except Exception:
             nbm_client = None
     markets = scan_once(config_path=config_path)

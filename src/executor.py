@@ -12,6 +12,7 @@ RULES ENFORCED HERE:
   9. Block same-day HIGHTEMP YES if obs shows socked-in conditions
   10. Block entry if any open position already exists for same city + target_date
   11. Hard cap on max contracts per trade (prevents oversizing on cheap contracts)
+  12. Hard cap on max trades closed per calendar day (prevents May-7 re-entry cycling)
 """
 import datetime as dt, math, yaml, os
 from db import conn, init_db
@@ -84,6 +85,25 @@ def total_balance_usd(kalshi_client) -> float:
     free_cash = resp.get("balance", 0) / 100.0
     portfolio = resp.get("portfolio_value", 0) / 100.0
     return free_cash + portfolio
+
+
+def _count_today_trades() -> int:
+    """Count total pnl rows closed today (UTC date).
+    Used to enforce max_daily_trades — prevents re-entry cycling
+    after TP/SL hits from accumulating more than N trades in one day.
+    Excludes settlement_pending rows which haven't resolved yet.
+    """
+    today = dt.date.today().isoformat()
+    with conn() as c:
+        row = c.execute(
+            """
+            SELECT COUNT(*) n FROM pnl
+            WHERE date(closed_at) = ?
+              AND reason != 'settlement_pending'
+            """,
+            (today,),
+        ).fetchone()
+    return row["n"] if row else 0
 
 
 def daily_loss_check(kalshi_client, cfg) -> bool:
@@ -171,6 +191,16 @@ def can_enter(ticker: str, cfg: dict, kalshi_client=None, candidate: dict = None
     max_pos = cfg["risk"]["max_open_positions"]
     if open_count >= max_pos:
         return False, f"position_cap:{open_count}/{max_pos}"
+
+    # Rule 12: daily trade count cap — prevents re-entry cycling on fast TP/SL
+    # days from accumulating 53 trades like the May-7 bleed event.
+    max_daily = int(cfg["risk"].get("max_daily_trades", 10))
+    today_count = _count_today_trades()
+    if today_count >= max_daily:
+        log_event("WARN", "executor",
+                  f"daily_trade_cap hit: {today_count}/{max_daily} trades today — blocking new entries")
+        return False, f"daily_trade_cap:{today_count}/{max_daily}"
+
     return True, ""
 
 
